@@ -1,0 +1,205 @@
+#include "stdafx.h"
+#include "level.h"
+#include "../xrEngine/x_ray.h"
+#include "../xrEngine/igame_persistent.h"
+#include "ai_space.h"
+#include "game_cl_base.h"
+#include "NET_Queue.h"
+#include "file_transfer.h"
+#include "hudmanager.h"
+#include "../xrphysics/iphworld.h"
+#include "phcommander.h"
+#include "physics_game.h"
+#include "string_table.h"
+
+struct _NetworkProcessor : public pureFrame
+{
+	virtual void OnFrame()
+	{
+		if (g_pGameLevel && !Device.Paused())
+			g_pGameLevel->net_Update();
+	}
+};
+_NetworkProcessor ServerUpdater = {};
+
+void CLevel::ClientSendProfileData()
+{
+	Msg("* Sending profile data");
+	NET_Packet NP;
+	NP.w_begin(M_CREATE_PLAYER_STATE);
+	game_PlayerState tmp_player_state(NULL);
+	tmp_player_state.net_Export(NP, TRUE);
+	SecureSend(NP, net_flags(TRUE, TRUE, TRUE, TRUE));
+}
+
+bool CLevel::net_start_client1()
+{
+	pApp->LoadBegin();
+	string64 name_of_server = "";
+	if (strchr(*m_caClientOptions, '/'))
+		strncpy_s(name_of_server, *m_caClientOptions, strchr(*m_caClientOptions, '/') - *m_caClientOptions);
+
+	if (strchr(name_of_server, '/')) *strchr(name_of_server, '/') = 0;
+
+	g_pGamePersistent->LoadTitle();
+	return true;
+}
+
+bool CLevel::net_start_client2()
+{
+	connected_to_server = Connect2Server(*m_caClientOptions);
+	if (connected_to_server)
+	{
+		if (!IsGameTypeSingle() && FS.path_exist("$game_arch_mp$"))
+		{
+			FS_Path* mp_archs_path = FS.get_path("$game_arch_mp$");
+			FS.rescan_path(mp_archs_path->m_Path, mp_archs_path->m_Flags.is(FS_Path::flRecurse));
+		}
+
+		LPCSTR level_name = "";
+		LPCSTR level_ver = "";
+		LPCSTR download_url = "";
+
+		// Determine Map... Server will be created as single... Otherwise it's will be another default mode
+		if (IsGameTypeSingle())
+		{
+			level_name = *name();
+			extern LPCSTR default_map_version;
+			level_ver = Server ? *Server->level_version(Server->GetConnectOptions()) : default_map_version;
+			download_url = "";
+		} else {
+			level_name = get_net_DescriptionData().map_name;
+			level_ver = get_net_DescriptionData().map_version;
+			download_url = get_net_DescriptionData().download_url;
+		}
+
+		// Determine internal level-ID
+		int level_id = pApp->Level_ID(level_name, level_ver, true);
+
+		// Fill map_data
+		map_data.m_name = level_name;
+		map_data.m_map_version = level_ver;
+		map_data.m_map_download_url = download_url;
+		map_data.m_map_loaded = Load(level_id);
+
+		// Verify map...
+		if (!map_data.m_map_loaded)
+		{
+			Disconnect();
+			deny_m_spawn = TRUE;
+			connected_to_server = FALSE;
+			Msg("! Level (name:%s), (version:%s), not found or corrupted! Download it from %s", level_name, level_ver, download_url);
+			return false;
+		}
+
+		// Success loaded!
+		Msg("--- net_start_client3: level_id [%d], level_name[%s], level_version[%s]", level_id, level_name, level_ver);
+		deny_m_spawn = FALSE;
+		CalculateLevelCrc32();
+		return true;
+	}
+	return false;
+}
+
+bool CLevel::net_start_client3()
+{
+	if (connected_to_server)
+	{
+		// Begin spawn
+		//		g_pGamePersistent->LoadTitle		("st_client_spawning");
+		g_pGamePersistent->LoadTitle();
+
+		// Send physics to single or multithreaded mode
+
+		create_physics_world(psDeviceFlags.test(mtPhysics), &ObjectSpace, &Objects, &Device);
+
+		R_ASSERT(physics_world());
+
+		m_ph_commander_physics_worldstep = xr_new<CPHCommander>();
+		physics_world()->set_update_callback(m_ph_commander_physics_worldstep);
+
+		physics_world()->set_default_contact_shotmark(ContactShotMark);
+		physics_world()->set_default_character_contact_shotmark(CharacterContactShotMark);
+
+		VERIFY(physics_world());
+		physics_world()->set_step_time_callback((PhysicsStepTimeCallback*)&PhisStepsCallback);
+
+		// Sending ServerUpdater to loop
+		Device.seqFrame.Remove(&ServerUpdater);
+		Device.seqFrame.Add(&ServerUpdater, REG_PRIORITY_LOW - 2);
+		
+		// Waiting for connection/configuration completition
+		CTimer timer_sync;
+		timer_sync.Start();
+		Msg("* Connection start sync!");
+		while (!net_isCompleted_Sync() || !net_isCompleted_Connect())
+		{
+			if (Server) Server->Update();
+			ClientReceive();
+			Sleep(5);
+		}
+		Msg("* Connection sync: %d took ms", timer_sync.GetElapsed_ms());
+	}
+	return true;
+}
+
+bool CLevel::net_start_client4()
+{
+	if (connected_to_server)
+	{
+		// Textures
+		if (!g_dedicated_server)
+		{
+			g_pGamePersistent->LoadTitle();
+			Device.m_pRender->DeferredLoad(FALSE);
+			Device.m_pRender->ResourcesDeferredUpload();
+			LL_CheckTextures();
+		}
+		sended_request_connection_data = FALSE;
+		deny_m_spawn = TRUE;
+	}
+	return true;
+}
+
+bool CLevel::net_start_client5()
+{
+	if (connected_to_server)
+	{
+		// Sync
+		if (!synchronize_map_data())
+			return false;
+
+		if (!game_configured)
+		{
+			pApp->LoadEnd();
+			return true;
+		}
+		if (!g_dedicated_server)
+		{
+			g_hud->Load();
+			g_hud->OnConnected();
+		}
+
+#ifdef DEBUG
+		Msg("--- net_start_client6");
+#endif // #ifdef DEBUG
+
+		if (game)
+		{
+			game->OnConnected();
+			m_file_transfer = xr_new<file_transfer::client_site>();
+		}
+
+		//		g_pGamePersistent->LoadTitle		("st_client_synchronising");
+		g_pGamePersistent->LoadTitle();
+		Device.PreCache(60, true, true);
+		net_start_result_total = TRUE;
+	}
+	else
+	{
+		net_start_result_total = FALSE;
+	}
+
+	pApp->LoadEnd();
+	return true;
+}
