@@ -68,6 +68,7 @@ public:
 
 	// NEW ADJUST
 	virtual void assign_RP(CSE_Abstract* E, game_PlayerState* ps_who);
+	virtual void RespawnPlayer(ClientID id_who, bool bReady) override;
 	virtual void OnPlayerConnect(ClientID id_who);
 	virtual void OnPlayerConnectFinished(ClientID id_who);
 	virtual void OnPlayerReady(ClientID id);

@@ -58,10 +58,17 @@
 #include "game_news.h"
 #include "alife_registry_wrappers.h"
 
+
 using namespace luabind;
 
 extern ENGINE_API float ps_r2_sun_shafts_min;
 extern ENGINE_API float ps_r2_sun_shafts_value;
+extern ENGINE_API bool g_dedicated_server;
+
+bool is_dedicated_server()
+{
+	return g_dedicated_server;
+}
 bool g_block_all_except_movement;
 bool g_actor_allow_ladder = true;
 
@@ -2454,6 +2461,7 @@ void CLevel::script_register(lua_State* L)
 
 	module(L)
 	[
+		def("is_dedicated_server", &is_dedicated_server),
 		def("command_line", &command_line),
 		def("IsGameTypeSingle", &IsGameTypeSingle),
 		def("IsDynamicMusic", &IsDynamicMusic),

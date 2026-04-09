@@ -100,6 +100,36 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
 	//	Msg					("* CLIENT: Spawn: %s, ID=%d", *E->s_name, E->ID);
 #endif
 
+	// Dedicated single: keep only controllable player actor proxies on server side.
+	// This preserves db.actor-dependent script logic while avoiding system actor body spawn.
+	if (g_dedicated_server && Game().Type() == eGameIDSingle)
+	{
+		CSE_ALifeCreatureActor* actor = smart_cast<CSE_ALifeCreatureActor*>(E);
+		if (actor && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+		{
+			Msg("--- [SV] Dedicated single: skipping non-player actor object spawn for [%s][%u].", E->name_replace(), E->ID);
+			return;
+		}
+	}
+
+	if (!g_dedicated_server && Game().Type() == eGameIDSingle)
+	{
+		// Skip system ALife actor on remote clients.
+		CSE_ALifeCreatureActor* actor = smart_cast<CSE_ALifeCreatureActor*>(E);
+		if (actor && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->ID == 0)
+		{
+			Msg("--- [CL] Dedicated single bridge: skipping system actor spawn for [%s][%u].", E->name_replace(), E->ID);
+			return;
+		}
+
+		// If system actor was skipped, do not spawn its inventory children as world drops.
+		if (E->ID_Parent == 0 && !Level().Objects.net_Find(0))
+		{
+			Msg("--- [CL] Dedicated single bridge: skipping orphan child of system actor [%s][%u].", E->name_replace(), E->ID);
+			return;
+		}
+	}
+
 	// Optimization for single-player only	- minimize traffic between client and server
 	psNET_Flags.set(NETFLAG_MINIMIZEUPDATES,FALSE);
 

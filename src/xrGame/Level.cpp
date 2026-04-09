@@ -189,10 +189,10 @@ CLevel::CLevel() :
 	m_dwDeltaUpdate = u32(fixed_step * 1000);
 	m_seniority_hierarchy_holder = xr_new<CSeniorityHierarchyHolder>();
 	m_space_restriction_manager = xr_new<CSpaceRestrictionManager>();
+	m_autosave_manager = xr_new<CAutosaveManager>();
 	if (!g_dedicated_server)
 	{
 		m_level_sound_manager = xr_new<CLevelSoundManager>();
-		m_autosave_manager = xr_new<CAutosaveManager>();
         m_debug_renderer = xr_new<CDebugRenderer>();
 #ifdef DEBUG
         m_level_debug = xr_new<CLevelDebug>();
@@ -1034,6 +1034,8 @@ void CLevel::AddObject_To_Objects4CrPr(CGameObject* pObj)
 void CLevel::AddActor_To_Actors4CrPr(CGameObject* pActor)
 {
 	if (!pActor)
+		return;
+	if (g_dedicated_server)
 		return;
 	if (!smart_cast<CActor*>(pActor)) return;
 	for (CGameObject* act : pActors4CrPr)

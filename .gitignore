@@ -17,6 +17,7 @@ lua51.dll
 lua51.exp
 lua51.lib
 luajit.exe
+*.md
 
 # luajit generated files
 src/3rd party/luajit-2/src/lj_bcdef.h

@@ -565,6 +565,14 @@ void game_sv_mp::RespawnPlayer(ClientID id_who, bool NoSpectator)
 void game_sv_mp::SpawnPlayer(ClientID id, LPCSTR N)
 {
 	xrClientData* CL = m_server->ID_to_client(id);
+	if (!CL)
+		return;
+
+	if (g_dedicated_server && CL == m_server->GetServerClient())
+	{
+		Msg("--- [SV] Dedicated server system client spawn as [%s] skipped.", N);
+		return;
+	}
 	//-------------------------------------------------
 	CL->net_PassUpdates = TRUE;
 	//-------------------------------------------------

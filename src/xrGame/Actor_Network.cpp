@@ -16,6 +16,8 @@
 #include "level.h"
 #include "xr_level_controller.h"
 #include "game_cl_base.h"
+#include "ai_space.h"
+#include "script_engine.h"
 #include "infoportion.h"
 #include "alife_registry_wrappers.h"
 #include "../Include/xrRender/Kinematics.h"
@@ -498,6 +500,52 @@ void CActor::net_Import_Physic_proceed()
 	CrPr_SetActivationStep(0);
 };
 
+
+static void TryBindDbActorToLocalPlayer(u16 actor_id)
+{
+	lua_State* L = ai().script_engine().lua();
+	if (!L)
+		return;
+
+	lua_getglobal(L, "level");
+	if (!lua_istable(L, -1))
+	{
+		lua_pop(L, 1);
+		return;
+	}
+
+	lua_getfield(L, -1, "object_by_id");
+	if (!lua_isfunction(L, -1))
+	{
+		lua_pop(L, 2);
+		return;
+	}
+
+	lua_pushinteger(L, actor_id);
+	if (lua_pcall(L, 1, 1, 0) != 0)
+	{
+		Msg("! [LUA] level.object_by_id(%u) failed while binding db.actor: %s", actor_id, lua_tostring(L, -1));
+		lua_pop(L, 2);
+		return;
+	}
+
+	if (lua_isnil(L, -1))
+	{
+		lua_pop(L, 2);
+		return;
+	}
+
+	lua_getglobal(L, "db");
+	if (lua_istable(L, -1))
+	{
+		lua_pushvalue(L, -2);
+		lua_setfield(L, -2, "actor");
+	}
+	lua_pop(L, 1);
+
+	// pop object and level tables
+	lua_pop(L, 2);
+}
 BOOL CActor::net_Spawn(CSE_Abstract* DC)
 {
 	m_holder_id = ALife::_OBJECT_ID(-1);
@@ -512,12 +560,46 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 	}
 	//force actor to be local on server client
 	CSE_ALifeCreatureActor* E = smart_cast<CSE_ALifeCreatureActor*>(DC);
+	VERIFY(E);
 
-	if (OnServer())
+	// Remote client should not instantiate dedicated system ALife actor (ID 0).
+	// Real controllable player will be spawned as mp_actor later.
+	if (!g_dedicated_server && Game().Type() == eGameIDSingle && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->ID == 0)
+	{
+		Msg("--- [CL] Dedicated single bridge: skipping system actor spawn ID: %u", E->ID);
+		return FALSE;
+	}
+
+	if (g_dedicated_server && Game().Type() == eGameIDSingle && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+	{
+		Msg("--- [SV] Dedicated single: CActor::net_Spawn skipped for non-player actor ID: %u", E->ID);
+		return FALSE;
+	}
+
+	if (!g_dedicated_server && OnServer())
+	{
+		// Это сработает для обычного синглплеера
 		E->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
+	}
 
-	if (!Actor() && E->s_flags.is(M_SPAWN_OBJECT_LOCAL) && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+	// 3. ПРОВЕРКА НА ВСЕЛЕНИЕ:
+	// Запрещаем дедику вызывать SetEntity. Вселяемся только в локального ASPLAYER.
+	const bool should_possess =
+		!g_dedicated_server &&
+		E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) &&
+		E->s_flags.is(M_SPAWN_OBJECT_LOCAL);
+	if (should_possess)
+	{
+		Msg("--- [CL] Possession SUCCESS for object ID: %u (self ID: %u, LOCAL=%d, ASPLAYER=%d)",
+			E->ID, ID(), E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER));
 		Level().SetEntity(this);
+	}
+	else
+	{
+		Msg("--- [SV/CL] Possession SKIPPED (Dedicated or non-local actor). LOCAL=%d ASPLAYER=%d",
+			E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER));
+	}
+	setEnabled(E->s_flags.is(M_SPAWN_OBJECT_LOCAL) || g_dedicated_server);
 
 	VERIFY(m_pActorEffector == NULL);
 
@@ -647,6 +729,9 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 
 	if (Level().IsDemoPlay() && OnClient())
 		setLocal(FALSE);
+
+	if (Game().Type() == eGameIDSingle && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->s_flags.is(M_SPAWN_OBJECT_LOCAL))
+		TryBindDbActorToLocalPlayer(ID());
 
 	//Alun: In theory it will call SwitchNightVision 'true' when outfit or helmet spawn and moved to slot if m_bNightVisionOn is true
 	m_bNightVisionOn = m_trader_flags.test(CSE_ALifeTraderAbstract::eTraderFlagNightVisionActive);
@@ -901,6 +986,9 @@ void CActor::PH_B_CrPr() // actions & operations before physic correction-predic
 		}
 		else
 		{
+			if (NET_A.empty() || NET.empty())
+				return;
+
 			net_update_A N_A = NET_A.back();
 			net_update N = NET.back();
 
@@ -1308,11 +1396,17 @@ void CActor::save(NET_Packet& output_packet)
 	inherited::save(output_packet);
 	CInventoryOwner::save(output_packet);
 	output_packet.w_u8(u8(m_bOutBorder));
-	CUITaskWnd* task_wnd = HUD().GetGameUI()->GetPdaMenu().pUITaskWnd;
-	output_packet.w_u8(task_wnd->IsTreasuresEnabled() ? 1 : 0);
-	output_packet.w_u8(task_wnd->IsQuestNpcsEnabled() ? 1 : 0);
-	output_packet.w_u8(task_wnd->IsSecondaryTasksEnabled() ? 1 : 0);
-	output_packet.w_u8(task_wnd->IsPrimaryObjectsEnabled() ? 1 : 0);
+	CUITaskWnd* task_wnd = nullptr;
+	if (!g_dedicated_server)
+	{
+		CUIGameCustom* game_ui = HUD().GetGameUI();
+		if (game_ui)
+			task_wnd = game_ui->GetPdaMenu().pUITaskWnd;
+	}
+	output_packet.w_u8(task_wnd && task_wnd->IsTreasuresEnabled() ? 1 : 0);
+	output_packet.w_u8(task_wnd && task_wnd->IsQuestNpcsEnabled() ? 1 : 0);
+	output_packet.w_u8(task_wnd && task_wnd->IsSecondaryTasksEnabled() ? 1 : 0);
+	output_packet.w_u8(task_wnd && task_wnd->IsPrimaryObjectsEnabled() ? 1 : 0);
 
 	output_packet.w_stringZ(g_quick_use_slots[0]);
 	output_packet.w_stringZ(g_quick_use_slots[1]);
@@ -1325,11 +1419,24 @@ void CActor::load(IReader& input_packet)
 	inherited::load(input_packet);
 	CInventoryOwner::load(input_packet);
 	m_bOutBorder = !!(input_packet.r_u8());
-	CUITaskWnd* task_wnd = HUD().GetGameUI()->GetPdaMenu().pUITaskWnd;
-	task_wnd->TreasuresEnabled(!!input_packet.r_u8());
-	task_wnd->QuestNpcsEnabled(!!input_packet.r_u8());
-	task_wnd->SecondaryTasksEnabled(!!input_packet.r_u8());
-	task_wnd->PrimaryObjectsEnabled(!!input_packet.r_u8());
+	CUITaskWnd* task_wnd = nullptr;
+	if (!g_dedicated_server)
+	{
+		CUIGameCustom* game_ui = HUD().GetGameUI();
+		if (game_ui)
+			task_wnd = game_ui->GetPdaMenu().pUITaskWnd;
+	}
+	const bool treasures_enabled = !!input_packet.r_u8();
+	const bool quest_npcs_enabled = !!input_packet.r_u8();
+	const bool secondary_tasks_enabled = !!input_packet.r_u8();
+	const bool primary_objects_enabled = !!input_packet.r_u8();
+	if (task_wnd)
+	{
+		task_wnd->TreasuresEnabled(treasures_enabled);
+		task_wnd->QuestNpcsEnabled(quest_npcs_enabled);
+		task_wnd->SecondaryTasksEnabled(secondary_tasks_enabled);
+		task_wnd->PrimaryObjectsEnabled(primary_objects_enabled);
+	}
 	//need_quick_slot_reload = true;
 
 	input_packet.r_stringZ(g_quick_use_slots[0], sizeof(g_quick_use_slots[0]));

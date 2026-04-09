@@ -39,8 +39,34 @@ void game_sv_Single::Create(shared_str& options)
 
 	if (strstr(*options, "/alife"))
 		m_alife_simulator = xr_new<CALifeSimulator>(&server(), &options);
-
 	switch_Phase(GAME_PHASE_INPROGRESS);
+
+}
+
+
+void game_sv_Single::RespawnPlayer(ClientID id_who, bool bReady)
+{
+	xrClientData* xrCData = server().ID_to_client(id_who);
+	if (!xrCData)
+		return;
+
+	if (g_dedicated_server && xrCData == server().GetServerClient())
+	{
+		if (xrCData->ps)
+			xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP);
+		Msg("--- [SV] Dedicated server system client respawn request ignored.");
+		return;
+	}
+
+	inherited::RespawnPlayer(id_who, bReady);
+
+	if (xrCData->owner)
+	{
+		CSE_Abstract* E = xrCData->owner;
+		E->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
+		E->s_flags.set(M_SPAWN_OBJECT_ASPLAYER, TRUE);
+		Msg("--- [SV] mp_actor [%u] successfully created and assigned to [%s] with LOCAL and ASPLAYER flags.", E->ID, xrCData->name.c_str());
+	}
 }
 
 void game_sv_Single::OnCreate(u16 id_who)
@@ -397,23 +423,36 @@ void game_sv_Single::OnPlayerConnect(ClientID id_who)
 void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 {
 	xrClientData* xrCData = server().ID_to_client(id_who);
+	if (!xrCData || !xrCData->ps)
+		return;
+
+	// Системный клиент дедика нам не нужен в мире
+	if (g_dedicated_server && xrCData == server().GetServerClient())
+	{
+		Msg("--- [SV] Dedicated Server system client registered. Skipping body spawn.");
+		return;
+	}
 
 	if (!xrCData->owner)
+	{
+		Msg("--- [SV] Client [%s] connected. Spawning spectator shell...", xrCData->name.c_str());
 		SpawnPlayer(id_who, "spectator");
+	}
 	else
 	{
 		SendPortionsData(id_who);
 		SendGamTasksData(id_who);
 	}
 
-	if (xrCData)
-	{
-		NET_Packet P;
-		P.w_begin(M_GAMEMESSAGE);
-		P.w_u32(GAME_EVENT_PLAYER_CONNECTED);
-		P.w_stringZ(xrCData->name.c_str());
-		server().SendBroadcast(BroadcastCID, P, net_flags(TRUE, TRUE, TRUE));
-	}
+	xrCData->ps->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
+	Msg("--- [SV] Client [%s] finished connecting. Spawning mp_actor...", xrCData->name.c_str());
+	OnPlayerReady(id_who);
+
+	NET_Packet P;
+	P.w_begin(M_GAMEMESSAGE);
+	P.w_u32(GAME_EVENT_PLAYER_CONNECTED);
+	P.w_stringZ(xrCData->name.c_str());
+	server().SendBroadcast(BroadcastCID, P, net_flags(TRUE, TRUE, TRUE));
 }
 
 void game_sv_Single::OnPlayerReady(ClientID id)
@@ -421,21 +460,33 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 	if (m_phase == GAME_PHASE_INPROGRESS)
 	{
 		xrClientData* xrCData = server().ID_to_client(id);
+		if (!xrCData || !xrCData->ps)
+			return;
+
 		game_PlayerState* ps = xrCData->ps;
+		if (g_dedicated_server && xrCData == server().GetServerClient())
+		{
+			ps->setFlag(GAME_PLAYER_FLAG_SKIP);
+			return;
+		}
+
+		if (!xrCData->owner)
+		{
+			Msg("--- [SV] No owner for [%s], spawning spectator shell before respawn...", xrCData->name.c_str());
+			SpawnPlayer(id, "spectator");
+			if (!xrCData->owner)
+				return;
+		}
+
 		if (ps->IsSkip())
 			return;
 
-		if (!ps->testFlag(GAME_PLAYER_FLAG_VERY_VERY_DEAD))
-			return;
-
-		xrClientData* xrSCData = static_cast<xrClientData*>(server().GetServerClient());
-		CSE_Abstract* pOwner = xrCData->owner;
-
-		RespawnPlayer(id, true);
-		pOwner = xrCData->owner;
-
-		for (xr_string itemSection : Default_Items)
-			SpawnWeapon4Actor(pOwner->ID, itemSection.c_str(), 0, ps->pItemList);
+		if (ps->testFlag(GAME_PLAYER_FLAG_SPECTATOR) || ps->testFlag(GAME_PLAYER_FLAG_VERY_VERY_DEAD))
+		{
+			Msg("--- [SV] Spawning mp_actor for [%s]...", xrCData->name.c_str());
+			RespawnPlayer(id, true);
+			ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR);
+		}
 	}
 }
 
