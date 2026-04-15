@@ -22,6 +22,8 @@
 #include "../xrEngine/gamemtllib.h"
 #include "hudsound.h"
 #include "script_game_object.h"
+#include "weapon_trace.h"
+
 
 #ifdef DEBUG
 #	include "../xrEngine/StatGraph.h"
@@ -619,6 +621,18 @@ void CExplosive::OnEvent(NET_Packet& P, u16 type)
 	{
 	case GE_GRENADE_EXPLODE:
 		{
+			if (m_explosion_flags.test(flExploding) || m_explosion_flags.test(flExploded))
+			{
+				WPN_TRACE("CExplosive::OnEvent GE_GRENADE_EXPLODE ignored duplicate obj=%u section=%s exploding=%d exploded=%d on_client=%d on_server=%d remote=%d",
+					cast_game_object()->ID(),
+					cast_game_object()->cNameSect().c_str(),
+					m_explosion_flags.test(flExploding) ? 1 : 0,
+					m_explosion_flags.test(flExploded) ? 1 : 0,
+					OnClient() ? 1 : 0,
+					OnServer() ? 1 : 0,
+					cast_game_object()->Remote() ? 1 : 0);
+				break;
+			}
 			Fvector pos, normal;
 			u16 parent_id;
 			P.r_u16(parent_id);
@@ -626,6 +640,15 @@ void CExplosive::OnEvent(NET_Packet& P, u16 type)
 			P.r_vec3(normal);
 
 			SetInitiator(parent_id);
+			WPN_TRACE("CExplosive::OnEvent GE_GRENADE_EXPLODE obj=%u section=%s parent=%u pos=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) on_client=%d on_server=%d remote=%d",
+				cast_game_object()->ID(),
+				cast_game_object()->cNameSect().c_str(),
+				parent_id,
+				pos.x, pos.y, pos.z,
+				normal.x, normal.y, normal.z,
+				OnClient() ? 1 : 0,
+				OnServer() ? 1 : 0,
+				cast_game_object()->Remote() ? 1 : 0);
 			ExplodeParams(pos, normal);
 			Explode();
 			m_fExplodeDuration = m_fExplodeDurationMax;
@@ -646,11 +669,52 @@ void CExplosive::ExplodeParams(const Fvector& pos,
 
 void CExplosive::GenExplodeEvent(const Fvector& pos, const Fvector& normal)
 {
-	if (OnClient() || cast_game_object()->Remote()) return;
+	const bool on_client = OnClient();
+	const bool on_server = OnServer();
+	const bool is_remote = cast_game_object()->Remote();
+	const bool is_single_game = g_pGameLevel && (Game().Type() == eGameIDSingle);
 
-	//	if( m_bExplodeEventSent ) 
-	//		return;
-	VERIFY(!m_explosion_flags.test(flExplodEventSent)); //!m_bExplodeEventSent
+	CActor* local_actor = Actor();
+	const bool local_actor_is_initiator =
+		local_actor &&
+		(Initiator() != u16(-1)) &&
+		(local_actor->ID() == Initiator());
+
+	const bool allow_client_authoritative_send =
+		on_client &&
+		!on_server &&
+		is_single_game &&
+		local_actor_is_initiator;
+
+	if (on_client && !allow_client_authoritative_send)
+	{
+		WPN_TRACE("CExplosive::GenExplodeEvent skipped obj=%u section=%s on_client=%d on_server=%d remote=%d dedicated=%d initiator=%u local_owner=%d allow_client_send=%d",
+			cast_game_object()->ID(),
+			cast_game_object()->cNameSect().c_str(),
+			on_client ? 1 : 0,
+			on_server ? 1 : 0,
+			is_remote ? 1 : 0,
+			g_dedicated_server ? 1 : 0,
+			u32(Initiator()),
+			local_actor_is_initiator ? 1 : 0,
+			allow_client_authoritative_send ? 1 : 0);
+		return;
+	}
+
+	if (m_explosion_flags.test(flExplodEventSent) || m_explosion_flags.test(flExploding) || m_explosion_flags.test(flExploded))
+	{
+		WPN_TRACE("CExplosive::GenExplodeEvent duplicate skip obj=%u section=%s sent=%d exploding=%d exploded=%d on_client=%d on_server=%d remote=%d",
+			cast_game_object()->ID(),
+			cast_game_object()->cNameSect().c_str(),
+			m_explosion_flags.test(flExplodEventSent) ? 1 : 0,
+			m_explosion_flags.test(flExploding) ? 1 : 0,
+			m_explosion_flags.test(flExploded) ? 1 : 0,
+			on_client ? 1 : 0,
+			on_server ? 1 : 0,
+			is_remote ? 1 : 0);
+		return;
+	}
+
 	VERIFY(0xffff != Initiator());
 
 	NET_Packet P;
@@ -658,9 +722,19 @@ void CExplosive::GenExplodeEvent(const Fvector& pos, const Fvector& normal)
 	P.w_u16(Initiator());
 	P.w_vec3(pos);
 	P.w_vec3(normal);
+	WPN_TRACE("CExplosive::GenExplodeEvent send obj=%u section=%s initiator=%u pos=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) on_client=%d on_server=%d remote=%d dedicated=%d local_owner=%d allow_client_send=%d",
+		cast_game_object()->ID(),
+		cast_game_object()->cNameSect().c_str(),
+		Initiator(),
+		pos.x, pos.y, pos.z,
+		normal.x, normal.y, normal.z,
+		on_client ? 1 : 0,
+		on_server ? 1 : 0,
+		is_remote ? 1 : 0,
+		g_dedicated_server ? 1 : 0,
+		local_actor_is_initiator ? 1 : 0,
+		allow_client_authoritative_send ? 1 : 0);
 	cast_game_object()->u_EventSend(P);
-
-	//m_bExplodeEventSent = true;
 	m_explosion_flags.set(flExplodEventSent,TRUE);
 }
 

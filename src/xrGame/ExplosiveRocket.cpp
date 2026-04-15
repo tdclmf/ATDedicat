@@ -87,6 +87,13 @@ void CExplosiveRocket::UpdateCL()
 
 void CExplosiveRocket::OnEvent(NET_Packet& P, u16 type)
 {
+	if (type == GE_GRENADE_EXPLODE)
+	{
+		inherited::OnEvent(P, type);
+		CExplosive::OnEvent(P, type);
+		return;
+	}
+
 	CExplosive::OnEvent(P, type);
 	inherited::OnEvent(P, type);
 }

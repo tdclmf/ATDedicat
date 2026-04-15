@@ -20,6 +20,7 @@
 #include "player_hud.h"
 #include "HUDManager.h"
 #include "WeaponKnife.h"
+#include "weapon_trace.h"
 
 static const float VEL_MAX = 10.f;
 static const float VEL_A_MAX = 10.f;
@@ -117,6 +118,43 @@ void CActor::g_fireParams(const CHudItem* pHudItem, Fvector& fire_pos, Fvector& 
 	fire_pos = Cameras().Position();
 	fire_dir = Cameras().Direction();
 
+	Fvector action_hint_pos{};
+	Fvector action_hint_dir{};
+	const bool have_action_hint = g_dedicated_server && GetDropHint(action_hint_pos, action_hint_dir, 3000);
+	if (have_action_hint)
+	{
+		fire_pos = action_hint_pos;
+		fire_dir = action_hint_dir;
+		WPN_TRACE("Actor::g_fireParams use action hint actor=%u pos=(%.3f,%.3f,%.3f) dir=(%.3f,%.3f,%.3f)",
+			ID(),
+			fire_pos.x, fire_pos.y, fire_pos.z,
+			fire_dir.x, fire_dir.y, fire_dir.z);
+	}
+
+	const bool invalid_camera_params =
+		(!_valid(fire_pos) || !_valid(fire_dir) || fire_dir.square_magnitude() < EPS);
+
+	// Dedicated mp_actor can have invalid camera transform on server.
+	// Fallback prevents RPG/VOG launch from (0,0,0).
+	if (!have_action_hint && (g_dedicated_server || invalid_camera_params))
+	{
+		fire_pos = Position();
+		fire_pos.y += CameraHeight();
+
+		fire_dir.setHP(r_torso.yaw, r_torso.pitch);
+		if (!_valid(fire_dir) || fire_dir.square_magnitude() < EPS)
+			fire_dir = Direction();
+		if (!_valid(fire_dir) || fire_dir.square_magnitude() < EPS)
+			fire_dir.set(0.f, 0.f, 1.f);
+		fire_dir.normalize_safe();
+
+		WPN_TRACE("Actor::g_fireParams fallback actor=%u pos=(%.3f,%.3f,%.3f) dir=(%.3f,%.3f,%.3f) dedicated=%d",
+			ID(),
+			fire_pos.x, fire_pos.y, fire_pos.z,
+			fire_dir.x, fire_dir.y, fire_dir.z,
+			g_dedicated_server ? 1 : 0);
+	}
+
 	const CMissile* pMissile = smart_cast<const CMissile*>(pHudItem);
 	if (pMissile)
 	{
@@ -148,6 +186,7 @@ void CActor::SetCantRunState(bool bDisable)
 {
 	if (g_Alive() && this == Level().CurrentControlEntity())
 	{
+		WPN_TRACE("Actor::SetCantRunState actor=%u disable=%d", ID(), bDisable ? 1 : 0);
 		NET_Packet P;
 		u_EventGen(P, GEG_PLAYER_DISABLE_SPRINT, ID());
 		P.w_s8(bDisable ? 1 : -1);
@@ -159,6 +198,7 @@ void CActor::SetWeaponHideState(u16 State, bool bSet)
 {
 	if (g_Alive() && this == Level().CurrentControlEntity())
 	{
+		WPN_TRACE("Actor::SetWeaponHideState actor=%u state=0x%04x set=%d", ID(), State, bSet ? 1 : 0);
 		NET_Packet P;
 		u_EventGen(P, GEG_PLAYER_WEAPON_HIDE_STATE, ID());
 		P.w_u16(State);

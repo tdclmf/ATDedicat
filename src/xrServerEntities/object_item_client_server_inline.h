@@ -52,8 +52,15 @@ IC CSObjectItemClientServerSingleMp::CObjectItemClientServerSingleMp(const CLASS
 TEMPLATE_SPECIALIZATION
 ObjectFactory::CLIENT_BASE_CLASS*CSObjectItemClientServerSingleMp::client_object() const
 {
+	// Dedicated-single bridge:
+	// client side of eGameIDSingle can be forced through MP actor pipeline (OnServer()==false),
+	// while classic local single remains single-type (OnServer()==true).
+	// For non-single game types always use MP type (vanilla/OMP behavior).
+	const bool use_single_type =
+		IsGameTypeSingle() &&
+		OnServer();
 	ObjectFactory::CLIENT_BASE_CLASS* result =
-		OnServer() ? xr_new<_client_type_single>() : xr_new<_client_type_mp>();
+		use_single_type ? xr_new<_client_type_single>() : xr_new<_client_type_mp>();
 
 	return (result->_construct());
 }
@@ -61,8 +68,10 @@ ObjectFactory::CLIENT_BASE_CLASS*CSObjectItemClientServerSingleMp::client_object
 TEMPLATE_SPECIALIZATION
 ObjectFactory::SERVER_BASE_CLASS*CSObjectItemClientServerSingleMp::server_object(LPCSTR section) const
 {
+	// Server entity type must be selected by game type, not by runtime role.
+	// Otherwise dedicated/listen MP can incorrectly receive single server entities.
 	ObjectFactory::SERVER_BASE_CLASS* result =
-		OnServer() ? xr_new<_server_type_single>(section) : xr_new<_server_type_mp>(section);
+		IsGameTypeSingle() ? xr_new<_server_type_single>(section) : xr_new<_server_type_mp>(section);
 
 	result = result->init();
 	R_ASSERT(result);

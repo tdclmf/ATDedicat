@@ -100,14 +100,14 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
 	//	Msg					("* CLIENT: Spawn: %s, ID=%d", *E->s_name, E->ID);
 #endif
 
-	// Dedicated single: keep only controllable player actor proxies on server side.
-	// This preserves db.actor-dependent script logic while avoiding system actor body spawn.
+	// Dedicated single: keep player actor proxies on server side.
+	// We skip only the system actor (ID 0), otherwise ownership/attach logic breaks.
 	if (g_dedicated_server && Game().Type() == eGameIDSingle)
 	{
 		CSE_ALifeCreatureActor* actor = smart_cast<CSE_ALifeCreatureActor*>(E);
-		if (actor && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+		if (actor && E->ID == 0)
 		{
-			Msg("--- [SV] Dedicated single: skipping non-player actor object spawn for [%s][%u].", E->name_replace(), E->ID);
+			Msg("--- [SV] Dedicated single: skipping system actor object spawn for [%s][%u].", E->name_replace(), E->ID);
 			return;
 		}
 	}

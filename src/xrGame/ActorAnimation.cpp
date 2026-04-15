@@ -38,6 +38,77 @@ static const float r_head_factor = 0.2f;
 
 CBlend* PlayMotionByParts(IKinematicsAnimated* sa, MotionID motion_ID, BOOL bMixIn, PlayCallback Callback,
                           LPVOID CallbackParam);
+namespace
+{
+	MotionID SelectFirstValidMotion(IKinematicsAnimated* visual, const LPCSTR* names, const u32 names_count)
+	{
+		MotionID motion;
+		if (!visual)
+			return motion;
+
+		for (u32 idx = 0; idx < names_count; ++idx)
+		{
+			const LPCSTR name = names[idx];
+			if (!name || !name[0])
+				continue;
+
+			MotionID candidate = visual->ID_Cycle_Safe(name);
+			if (candidate)
+				return candidate;
+		}
+
+		return motion;
+	}
+
+	MotionID GetPdaTorsoFallbackMotion(IKinematicsAnimated* visual, const CPda* pda)
+	{
+		MotionID motion;
+		if (!visual || !pda)
+			return motion;
+
+		switch (pda->GetState())
+		{
+		case CPda::eShowing:
+			{
+				static const LPCSTR show_motions[] = {"norm_torso_pda_draw_0", "norm_torso_detector_draw_0"};
+				return SelectFirstValidMotion(visual, show_motions, static_cast<u32>(sizeof(show_motions) / sizeof(show_motions[0])));
+			}
+		case CPda::eHiding:
+			{
+				static const LPCSTR hide_motions[] = {"norm_torso_pda_holster_0", "norm_torso_detector_holster_0"};
+				return SelectFirstValidMotion(visual, hide_motions, static_cast<u32>(sizeof(hide_motions) / sizeof(hide_motions[0])));
+			}
+		case CPda::eIdle:
+			{
+				if (pda->m_bZoomed)
+				{
+					static const LPCSTR zoom_motions[] = {
+						"norm_torso_pda_attack_0",
+						"norm_torso_detector_attack_0",
+						"norm_torso_pda_idle_1",
+						"norm_torso_detector_idle_1",
+						"norm_torso_pda_idle_0",
+						"norm_torso_detector_idle_0"
+					};
+					return SelectFirstValidMotion(visual, zoom_motions, static_cast<u32>(sizeof(zoom_motions) / sizeof(zoom_motions[0])));
+				}
+
+				static const LPCSTR idle_motions[] = {
+					"norm_torso_pda_idle_0",
+					"norm_torso_pda_idle_1",
+					"norm_torso_detector_idle_0",
+					"norm_torso_detector_idle_1"
+				};
+				return SelectFirstValidMotion(visual, idle_motions, static_cast<u32>(sizeof(idle_motions) / sizeof(idle_motions[0])));
+			}
+		default:
+			{
+				static const LPCSTR default_motions[] = {"norm_torso_pda_idle_0", "norm_torso_detector_idle_0"};
+				return SelectFirstValidMotion(visual, default_motions, static_cast<u32>(sizeof(default_motions) / sizeof(default_motions[0])));
+			}
+		}
+	}
+}
 
 void CActor::Spin0Callback(CBoneInstance* B)
 {
@@ -650,6 +721,9 @@ void CActor::g_SetAnimation(u32 mstate_rl)
 						default: M_torso = ST->m_torso[4].moving[moving_idx];
 							break;
 						}
+
+						if (!M_torso)
+							M_torso = GetPdaTorsoFallbackMotion(smart_cast<IKinematicsAnimated*>(Visual()), P);
 					}
 				}
 			}

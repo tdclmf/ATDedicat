@@ -21,10 +21,33 @@
 #include "clsid_game.h"
 #include "weaponpistol.h"
 #include "HUDManager.h"
+#include "game_cl_base.h"
+#include "weapon_trace.h"
 
 ENGINE_API extern float psHUD_FOV_def;
 int g_nearwall = NW_FOV;
 int g_nearwall_trace = NT_CAM;
+
+namespace
+{
+bool IsDedicatedSingleLocalHudOwner(const CHudItem* item)
+{
+	if (!g_pGameLevel || !item || g_dedicated_server || !OnClient())
+		return false;
+	if (!item->has_object())
+		return false;
+
+	const CActor* actor = smart_cast<CActor*>(item->object().H_Parent());
+	if (!actor)
+		return false;
+
+	game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+	const bool local_player_id_match =
+		game_cl && game_cl->local_player && game_cl->local_player->GameID == actor->ID();
+
+	return local_player_id_match || Level().CurrentControlEntity() == actor || Level().CurrentEntity() == actor;
+}
+}
 
 CHudItem::CHudItem()
 {
@@ -140,10 +163,51 @@ void CHudItem::renderable_Render()
 
 void CHudItem::SwitchState(u32 S)
 {
-	if (OnClient())
+	const bool dedicated_single_local_item = IsDedicatedSingleLocalHudOwner(this);
+	if (dedicated_single_local_item && S == eShowing)
+	{
+		const CActor* actor = smart_cast<CActor*>(object().H_Parent());
+		if (actor && actor->inventory().GetNextActiveSlot() == NO_ACTIVE_SLOT)
+		{
+			WPN_TRACE("HudItem::SwitchState blocked eShowing during holster item=%s actor=%u active=%u next=%u state=%u next_state=%u",
+				object().cName().c_str(),
+				actor->ID(),
+				actor->inventory().GetActiveSlot(),
+				actor->inventory().GetNextActiveSlot(),
+				GetState(),
+				GetNextState());
+			return;
+		}
+	}
+	WPN_TRACE("HudItem::SwitchState item=%s from=%u to=%u local=%d remote=%d on_client=%d on_server=%d dedicated_single_local=%d",
+		object().cName().c_str(), GetState(), S, object().Local() ? 1 : 0, object().Remote() ? 1 : 0,
+		OnClient() ? 1 : 0, OnServer() ? 1 : 0, dedicated_single_local_item ? 1 : 0);
+	if (OnClient() && !dedicated_single_local_item)
+	{
+		// Remote replicated items on clients must process local animation-state transitions,
+		// otherwise they can stay in showing/fire/hiding loops for observers.
+		if (object().Remote())
+		{
+			const u32 old_state_remote = GetState();
+			SetNextState(S);
+			WPN_TRACE("HudItem::SwitchState remote client immediate OnStateSwitch item=%s state=%u", object().cName().c_str(), S);
+			OnStateSwitch(S, old_state_remote);
+		}
+		else
+		{
+			WPN_TRACE("HudItem::SwitchState blocked on client for non-local dedicated-single item=%s", object().cName().c_str());
+		}
 		return;
+	}
 
+	const u32 old_state = GetState();
 	SetNextState(S);
+
+	if (dedicated_single_local_item)
+	{
+		WPN_TRACE("HudItem::SwitchState immediate OnStateSwitch item=%s state=%u", object().cName().c_str(), S);
+		OnStateSwitch(S, old_state);
+	}
 
 	if (object().Local() && !object().getDestroy())
 	{
@@ -152,6 +216,12 @@ void CHudItem::SwitchState(u32 S)
 		object().u_EventGen(P, GE_WPN_STATE_CHANGE, object().ID());
 		P.w_u8(u8(S));
 		object().u_EventSend(P);
+		WPN_TRACE("HudItem::SwitchState sent GE_WPN_STATE_CHANGE item=%s state=%u", object().cName().c_str(), S);
+	}
+	else
+	{
+		WPN_TRACE("HudItem::SwitchState no network event item=%s local=%d destroy=%d",
+			object().cName().c_str(), object().Local() ? 1 : 0, object().getDestroy() ? 1 : 0);
 	}
 }
 
@@ -161,9 +231,24 @@ void CHudItem::OnEvent(NET_Packet& P, u16 type)
 	{
 	case GE_WPN_STATE_CHANGE:
 		{
-			u8 S;
-			P.r_u8(S);
-			OnStateSwitch(u32(S), GetState());
+		u8 S;
+		P.r_u8(S);
+		WPN_TRACE("HudItem::OnEvent GE_WPN_STATE_CHANGE item=%s state=%u current=%u on_server=%d on_client=%d dedicated_single_local=%d",
+			object().cName().c_str(), S, GetState(), OnServer() ? 1 : 0, OnClient() ? 1 : 0,
+			IsDedicatedSingleLocalHudOwner(this) ? 1 : 0);
+		if (OnServer())
+		{
+			SetState(S);
+			SetNextState(S);
+		}
+
+		if (IsDedicatedSingleLocalHudOwner(this))
+		{
+			WPN_TRACE("HudItem::OnEvent GE_WPN_STATE_CHANGE ignored local dedicated-single item=%s", object().cName().c_str());
+			break;
+		}
+
+		OnStateSwitch(u32(S), GetState());
 		}
 		break;
 	}
@@ -171,6 +256,8 @@ void CHudItem::OnEvent(NET_Packet& P, u16 type)
 
 void CHudItem::OnStateSwitch(u32 S, u32 oldState)
 {
+	WPN_TRACE("HudItem::OnStateSwitch item=%s from=%u to=%u remote=%d attached=%d",
+		object().cName().c_str(), oldState, S, object().Remote() ? 1 : 0, IsAttachedToHUD() ? 1 : 0);
 	m_lastState = oldState;
 	SetState(S);
 
@@ -179,6 +266,14 @@ void CHudItem::OnStateSwitch(u32 S, u32 oldState)
 
 	switch (S)
 	{
+	case eHiding:
+		if (g_dedicated_server || !HudAnimationExist("anm_hide"))
+		{
+			WPN_TRACE("HudItem::OnStateSwitch forcing eHidden from eHiding item=%s dedicated=%d has_hide_anim=%d",
+				object().cName().c_str(), g_dedicated_server ? 1 : 0, HudAnimationExist("anm_hide") ? 1 : 0);
+			SwitchState(eHidden);
+		}
+		break;
 	case eBore:
 		SetPending(FALSE);
 
@@ -197,6 +292,7 @@ void CHudItem::OnStateSwitch(u32 S, u32 oldState)
 	case eHidden:
 		if (IsAttachedToHUD())
 			g_player_hud->detach_item(this);
+		SetPending(FALSE);
 		break;
 	}
 
@@ -207,10 +303,25 @@ void CHudItem::OnStateSwitch(u32 S, u32 oldState)
 void CHudItem::OnAnimationEnd(u32 state)
 {
 	CActor* A = smart_cast<CActor*>(object().H_Parent());
+	const bool dedicated_single_local_item = IsDedicatedSingleLocalHudOwner(this);
+	const bool skip_hud_anim_end_callback =
+		dedicated_single_local_item && (state == eHiding || state == eShowing || state == eHidden);
+	WPN_TRACE("HudItem::OnAnimationEnd item=%s state=%u current=%u next=%u dedicated_single_local=%d skip_script_cb=%d",
+		object().cName().c_str(), state, GetState(), GetNextState(),
+		dedicated_single_local_item ? 1 : 0, skip_hud_anim_end_callback ? 1 : 0);
 	if (A)
-		A->callback(GameObject::eActorHudAnimationEnd)(smart_cast<CGameObject*>(this)->lua_game_object(),
-		                                               this->hud_sect.c_str(), this->m_current_motion.c_str(), state,
-		                                               this->animation_slot());
+	{
+		if (skip_hud_anim_end_callback)
+		{
+			WPN_TRACE("HudItem::OnAnimationEnd skipped eActorHudAnimationEnd callback item=%s state=%u", object().cName().c_str(), state);
+		}
+		else
+		{
+			A->callback(GameObject::eActorHudAnimationEnd)(smart_cast<CGameObject*>(this)->lua_game_object(),
+			                                               this->hud_sect.c_str(), this->m_current_motion.c_str(), state,
+			                                               this->animation_slot());
+		}
+	}
 
 	switch (state)
 	{
@@ -235,6 +346,26 @@ bool CHudItem::TryPlayAnimBore()
 
 bool CHudItem::ActivateItem()
 {
+	CActor* actor_owner = smart_cast<CActor*>(object().H_Parent());
+	u16 active_slot = u16(-1);
+	u16 next_slot = u16(-1);
+	if (actor_owner)
+	{
+		active_slot = actor_owner->inventory().GetActiveSlot();
+		next_slot = actor_owner->inventory().GetNextActiveSlot();
+	}
+	WPN_TRACE("HudItem::ActivateItem item=%s actor=%u active=%u next=%u state=%u next_state=%u attached=%d local=%d remote=%d on_client=%d on_server=%d",
+		object().cName().c_str(),
+		actor_owner ? actor_owner->ID() : u16(-1),
+		active_slot,
+		next_slot,
+		GetState(),
+		GetNextState(),
+		IsAttachedToHUD() ? 1 : 0,
+		object().Local() ? 1 : 0,
+		object().Remote() ? 1 : 0,
+		OnClient() ? 1 : 0,
+		OnServer() ? 1 : 0);
 	OnActiveItem();
 	return true;
 }
@@ -258,10 +389,23 @@ void CHudItem::SendHiddenItem()
 {
 	if (!object().getDestroy())
 	{
+		WPN_TRACE("HudItem::SendHiddenItem item=%s state=%u next=%u local=%d on_client=%d on_server=%d",
+			object().cName().c_str(), GetState(), GetNextState(), object().Local() ? 1 : 0,
+			OnClient() ? 1 : 0, OnServer() ? 1 : 0);
 		NET_Packet P;
 		object().u_EventGen(P, GE_WPN_STATE_CHANGE, object().ID());
 		P.w_u8(u8(eHiding));
 		object().u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
+		if (IsDedicatedSingleLocalHudOwner(this))
+		{
+			WPN_TRACE("HudItem::SendHiddenItem immediate SwitchState(eHiding) for dedicated-single item=%s", object().cName().c_str());
+			SwitchState(eHiding);
+		}
+		else
+		{
+			SetPending(TRUE);
+			WPN_TRACE("HudItem::SendHiddenItem set pending item=%s", object().cName().c_str());
+		}
 	}
 }
 

@@ -17,6 +17,7 @@
 #include "Artefact.h"
 #include "MPPlayersBag.h"
 #include "WeaponKnife.h"
+#include "weapon_trace.h"
 
 #include "game_sv_mp_vote_flags.h"
 #include "player_name_modifyer.h"
@@ -292,10 +293,12 @@ void game_sv_mp::KillPlayer(ClientID id_who, u16 GameID)
 
 void game_sv_mp::OnEvent(NET_Packet& P, u16 type, u32 time, ClientID sender)
 {
+	WPN_TRACE("game_sv_mp::OnEvent type=%u sender=0x%08x time=%u", type, sender.value(), time);
 	switch (type)
 	{
 	case GAME_EVENT_PLAYER_KILLED: //playerKillPlayer
 		{
+			WPN_TRACE("game_sv_mp::OnEvent GAME_EVENT_PLAYER_KILLED sender=0x%08x", sender.value());
 #ifdef DEBUG
 			xrClientData *l_pC	= m_server->ID_to_client(sender);
 			if (l_pC && l_pC->ps)
@@ -306,6 +309,7 @@ void game_sv_mp::OnEvent(NET_Packet& P, u16 type, u32 time, ClientID sender)
 		break;
 	case GAME_EVENT_PLAYER_HITTED:
 		{
+			WPN_TRACE("game_sv_mp::OnEvent GAME_EVENT_PLAYER_HITTED sender=0x%08x", sender.value());
 #ifdef DEBUG
 			xrClientData *l_pC	= m_server->ID_to_client(sender);
 			if (l_pC && l_pC->ps)
@@ -316,6 +320,7 @@ void game_sv_mp::OnEvent(NET_Packet& P, u16 type, u32 time, ClientID sender)
 		break;
 	case GAME_EVENT_PLAYER_READY: // cs & dm 
 		{
+			WPN_TRACE("game_sv_mp::OnEvent GAME_EVENT_PLAYER_READY sender=0x%08x", sender.value());
 			xrClientData* l_pC = m_server->ID_to_client(sender);
 			if (!l_pC) break;
 			OnPlayerReady(l_pC->ID);
@@ -323,6 +328,7 @@ void game_sv_mp::OnEvent(NET_Packet& P, u16 type, u32 time, ClientID sender)
 		break;
 	case GAME_EVENT_PLAYER_BUY_SPAWN:
 		{
+			WPN_TRACE("game_sv_mp::OnEvent GAME_EVENT_PLAYER_BUY_SPAWN sender=0x%08x", sender.value());
 			xrClientData* l_pC = m_server->ID_to_client(sender);
 			if (!l_pC) break;
 			OnPlayerBuySpawn(l_pC->ID);
@@ -423,6 +429,7 @@ void game_sv_mp::OnEvent(NET_Packet& P, u16 type, u32 time, ClientID sender)
 		}
 		break;
 	default:
+		WPN_TRACE("game_sv_mp::OnEvent forwarded to inherited type=%u sender=0x%08x", type, sender.value());
 		inherited::OnEvent(P, type, time, sender);
 	}; //switch
 }
@@ -593,6 +600,11 @@ void game_sv_mp::SpawnPlayer(ClientID id, LPCSTR N)
 
 	if (pA)
 	{
+		// Dedicated-single bridge safety: never spawn player actor in dead state.
+		pA->set_killer_id(ALife::_OBJECT_ID(-1));
+		pA->set_health(1.f);
+		pA->m_bDeathIsProcessed = false;
+
 		pA->s_team = u8(ps_who->team);
 		assign_RP(pA, ps_who);
 		SetSkin(E, pA->s_team, ps_who->skin);

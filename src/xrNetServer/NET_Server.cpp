@@ -15,6 +15,27 @@ XRNETSERVER_API int psNET_ServerPending = 3;
 XRNETSERVER_API ClientID BroadcastCID(0xffffffff);
 XRNETSERVER_API IPureServer* sptr;
 
+namespace
+{
+struct RemoteConnectedClientsCounter
+{
+    u32 count;
+
+    RemoteConnectedClientsCounter() : count(0) {}
+
+    void operator()(IClient* client)
+    {
+        if (!client)
+            return;
+        if (!client->flags.bConnected)
+            return;
+        if (client->flags.bLocal)
+            return;
+        ++count;
+    }
+};
+} // namespace
+
 // Реализация методов ip_address
 void ip_address::set(LPCSTR src_string)
 {
@@ -138,6 +159,7 @@ IPureServer::~IPureServer()
 IPureServer::EConnect IPureServer::Connect(LPCSTR options, GameDescriptionData& game_descr)
 {
     connect_options = options;
+    M_MaxPlayers = 32;
 
     string4096 session_name;
     string64 password_str = "";
@@ -166,7 +188,10 @@ IPureServer::EConnect IPureServer::Connect(LPCSTR options, GameDescriptionData& 
         M_MaxPlayers = atol(tmpStr);
     }
 
-    clamp(M_MaxPlayers, 2U, 32U);
+    if (m_bDedicated)
+        clamp(M_MaxPlayers, 1U, 32U);
+    else
+        clamp(M_MaxPlayers, 2U, 32U);
 
     psNET_Port = START_PORT_LAN_SV;
     if (strstr(options, "portsv="))
@@ -191,6 +216,13 @@ IPureServer::EConnect IPureServer::Connect(LPCSTR options, GameDescriptionData& 
     BannedList_Load();
     IpList_Load();
     return ErrNoError;
+}
+
+u32 IPureServer::GetRemoteConnectedClientsCount()
+{
+    RemoteConnectedClientsCounter counter;
+    net_players.ForEachClientDo(counter);
+    return counter.count;
 }
 
 void IPureServer::Disconnect()
@@ -295,10 +327,12 @@ void IPureServer::OnStateChange(SteamNetConnectionStatusChangedCallback_t* pInfo
         Msg("--- [SteamworksServer] Connection request from [%u]", pInfo->m_hConn);
 
         // Проверяем не заполнен ли сервер
-        if (GetClientsCount() >= M_MaxPlayers)
+        const u32 clients_for_limit = m_bDedicated ? GetRemoteConnectedClientsCount() : GetClientsCount();
+        if (clients_for_limit >= M_MaxPlayers)
         {
             SteamInterfaceP->CloseConnection(pInfo->m_hConn, ESessionFull, "Server full", false);
-            Msg("! [SteamworksServer] Connection rejected: server full");
+            Msg("! [SteamworksServer] Connection rejected: server full (%u/%u, total clients=%u, dedicated=%d)",
+                clients_for_limit, M_MaxPlayers, GetClientsCount(), m_bDedicated ? 1 : 0);
             break;
         }
 

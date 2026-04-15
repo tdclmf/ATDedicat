@@ -222,12 +222,22 @@ void CDialogHolder::SetMainInputReceiver(CUIDialogWnd* ir, bool _find_remove)
 			for (; cnt > 0; --cnt)
 				if (m_input_receivers[cnt - 1].m_item == ir)
 				{
-					m_input_receivers[cnt].m_flags.set(recvItem::eCrosshair,
-					                                   m_input_receivers[cnt - 1].m_flags.test(recvItem::eCrosshair));
-					m_input_receivers[cnt].m_flags.set(recvItem::eIndicators,
-					                                   m_input_receivers[cnt - 1].m_flags.test(recvItem::eIndicators));
+					const u32 remove_idx = cnt - 1;
+
+					// Preserve indicator/crosshair flags for the receiver that will become active
+					// after erase, but do not write out of bounds when removing the last element.
+					if (remove_idx + 1 < m_input_receivers.size())
+					{
+						m_input_receivers[remove_idx + 1].m_flags.set(
+							recvItem::eCrosshair,
+							m_input_receivers[remove_idx].m_flags.test(recvItem::eCrosshair));
+						m_input_receivers[remove_idx + 1].m_flags.set(
+							recvItem::eIndicators,
+							m_input_receivers[remove_idx].m_flags.test(recvItem::eIndicators));
+					}
+
 					xr_vector<recvItem>::iterator it = m_input_receivers.begin();
-					std::advance(it, cnt - 1);
+					std::advance(it, remove_idx);
 					m_input_receivers.erase(it);
 					break;
 				}

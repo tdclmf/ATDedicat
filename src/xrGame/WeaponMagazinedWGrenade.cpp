@@ -11,12 +11,80 @@
 #include "object_broker.h"
 #include "game_base_space.h"
 #include "../xrphysics/MathUtils.h"
+#include "../xrphysics/PhysicsShell.h"
 #include "player_hud.h"
+#include "inventory_item.h"
+#include "weapon_trace.h"
 #include "../build_config_defines.h"
 
 #ifdef DEBUG
 #	include "phdebug.h"
 #endif
+
+namespace
+{
+	void ApplyAuthoritativeRocketLaunchEvent(NET_Packet& P, const u16 rocket_id, LPCSTR owner_name)
+	{
+		u8 launch_flags = 0;
+		Fvector launch_pos{};
+		Fvector launch_vel{};
+		u16 launch_initiator = u16(-1);
+		bool has_pos = false;
+		bool has_vel = false;
+
+		const u32 unread_after_id = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_id >= sizeof(u8))
+			launch_flags = P.r_u8();
+
+		const u32 unread_after_flags = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_flags >= sizeof(Fvector))
+		{
+			P.r_vec3(launch_pos);
+			has_pos = _valid(launch_pos);
+		}
+
+		const u32 unread_after_pos = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_pos >= sizeof(Fvector))
+		{
+			P.r_vec3(launch_vel);
+			has_vel = _valid(launch_vel);
+		}
+		const u32 unread_after_vel = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_vel >= sizeof(u16))
+			launch_initiator = P.r_u16();
+
+		CCustomRocket* rocket = smart_cast<CCustomRocket*>(Level().Objects.net_Find(rocket_id));
+		if (!rocket)
+			return;
+
+		Fmatrix launch_xform = rocket->XFORM();
+		if (has_vel && launch_vel.square_magnitude() > EPS)
+		{
+			Fvector launch_dir = launch_vel;
+			launch_dir.normalize_safe();
+			launch_xform.k.set(launch_dir);
+			Fvector::generate_orthonormal_basis(launch_xform.k, launch_xform.j, launch_xform.i);
+		}
+		if (has_pos)
+			launch_xform.c.set(launch_pos);
+		rocket->ApplyAuthoritativeLaunch(launch_xform, launch_vel, has_vel);
+		if (launch_initiator != u16(-1))
+			if (CExplosiveRocket* explosive_rocket = smart_cast<CExplosiveRocket*>(rocket))
+				explosive_rocket->SetInitiator(launch_initiator);
+		if (CInventoryItem* inv_rocket = smart_cast<CInventoryItem*>(rocket))
+			inv_rocket->ClearNetInterpolationQueue();
+
+		WPN_TRACE("WeaponMagazinedWGrenade::ApplyAuthoritativeRocketLaunch owner=%s rocket=%u flags=%u has_pos=%d has_vel=%d initiator=%u pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
+			owner_name ? owner_name : "<null>",
+			rocket_id,
+			u32(launch_flags),
+			has_pos ? 1 : 0,
+			has_vel ? 1 : 0,
+			u32(launch_initiator),
+			launch_pos.x, launch_pos.y, launch_pos.z,
+			launch_vel.x, launch_vel.y, launch_vel.z);
+	}
+}
 
 CWeaponMagazinedWGrenade::CWeaponMagazinedWGrenade(ESoundTypes eSoundType) : CWeaponMagazined(eSoundType)
 {
@@ -122,9 +190,32 @@ BOOL CWeaponMagazinedWGrenade::net_Spawn(CSE_Abstract* DC)
 void CWeaponMagazinedWGrenade::switch2_Reload()
 {
 	VERIFY(GetState() == eReload);
+	SetAwaitingLocalAmmoSyncAfterReload(false);
 	if (m_bGrenadeMode)
 	{
 		m_needReload = true;
+		if (g_dedicated_server)
+		{
+			if (ParentIsActor())
+			{
+				// Same as primary fire mode: dedicated server waits for owning client ammo sync.
+				m_needReload = false;
+				SetPending(FALSE);
+				SetAwaitingLocalAmmoSyncAfterReload(true);
+				WPN_TRACE("WeaponMagazinedWGrenade::switch2_Reload dedicated defer to client ammo sync weapon=%s ammo=%d",
+					cName().c_str(), iAmmoElapsed);
+				SwitchState(eIdle);
+				return;
+			}
+
+			ReloadMagazine();
+			SetPending(FALSE);
+			SetAwaitingLocalAmmoSyncAfterReload(false);
+			WPN_TRACE("WeaponMagazinedWGrenade::switch2_Reload dedicated immediate eIdle weapon=%s ammo=%d",
+				cName().c_str(), iAmmoElapsed);
+			SwitchState(eIdle);
+			return;
+		}
 		PlaySound("sndReloadG", get_LastFP2());
 		PlayHUDMotion("anm_reload_g", TRUE, this, GetState());
 		SetPending(TRUE);
@@ -283,7 +374,9 @@ bool CWeaponMagazinedWGrenade::Action(u16 cmd, u32 flags)
 {
 	if (m_bGrenadeMode && cmd == kWPN_FIRE)
 	{
-		if (IsPending())
+		if (OnServer() && IsAwaitingLocalAmmoSyncAfterReload())
+			return false;
+		if (IsPending() || GetState() == eReload || GetNextState() == eReload)
 			return false;
 
 		if (ParentIsActor() && Actor()->is_safemode())
@@ -377,6 +470,8 @@ void CWeaponMagazinedWGrenade::OnEvent(NET_Packet& P, u16 type)
 			CRocketLauncher::DetachRocket(id, bLaunch);
 			if (bLaunch)
 			{
+				if (OnClient())
+					ApplyAuthoritativeRocketLaunchEvent(P, id, cName().c_str());
 				PlayAnimShoot();
 				PlaySound("sndShotG", get_LastFP2());
 				AddShotEffector();
@@ -413,7 +508,6 @@ void CWeaponMagazinedWGrenade::LaunchGrenade()
 			}
 			E->g_fireParams(this, p1, d);
 		}
-		p1.set(get_LastFP2());
 
 		Fmatrix launch_matrix;
 		launch_matrix.identity();
@@ -459,14 +553,16 @@ void CWeaponMagazinedWGrenade::LaunchGrenade()
 		d.mul(CRocketLauncher::m_fLaunchSpeed);
 #endif
 		VERIFY2(_valid(launch_matrix), "CWeaponMagazinedWGrenade::SwitchState. Invalid launch_matrix!");
+		const u16 launched_rocket_id = u16(getCurrentRocket()->ID());
 		CRocketLauncher::LaunchRocket(launch_matrix, d, zero_vel);
 
-		CExplosiveRocket* pGrenade = smart_cast<CExplosiveRocket*>(getCurrentRocket());
+		CExplosiveRocket* pGrenade = smart_cast<CExplosiveRocket*>(Level().Objects.net_Find(launched_rocket_id));
 		VERIFY(pGrenade);
 		pGrenade->SetInitiator(H_Parent()->ID());
 
-		if (Local() && OnServer())
+		if (OnServer())
 		{
+			CRocketLauncher::DetachRocket(launched_rocket_id, true);
 			VERIFY(m_magazine.size());
 			m_magazine.pop_back();
 			--iAmmoElapsed;
@@ -474,7 +570,11 @@ void CWeaponMagazinedWGrenade::LaunchGrenade()
 
 			NET_Packet P;
 			u_EventGen(P, GE_LAUNCH_ROCKET, ID());
-			P.w_u16(getCurrentRocket()->ID());
+			P.w_u16(launched_rocket_id);
+			P.w_u8(0);
+			P.w_vec3(launch_matrix.c);
+			P.w_vec3(d);
+			P.w_u16(H_Parent() ? H_Parent()->ID() : u16(-1));
 			u_EventSend(P);
 		};
 	}

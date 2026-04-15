@@ -7,12 +7,35 @@
 #include "../xrEngine/camerabase.h"
 //#include "Physics.h"
 #include "../xrphysics/phvalide.h"
+#include "weapon_trace.h"
+
+extern bool g_dedicated_single_import_from_cl_update;
 
 void CActorMP::net_Import(NET_Packet& P)
 {
 	net_update N;
 
 	m_state_holder.read(P);
+	R_ASSERT2(valid_pos(m_state_holder.state().position), "imported bad position");
+	const u16 imported_active_slot = m_state_holder.state().inventory_active_slot;
+	if (imported_active_slot != inventory().GetActiveSlot())
+	{
+		WPN_TRACE("ActorMP::net_Import actor=%u local=%d remote=%d on_client=%d on_server=%d active_slot=%u->%u",
+			ID(), Local() ? 1 : 0, Remote() ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0,
+			inventory().GetActiveSlot(), imported_active_slot);
+	}
+
+	const bool ignore_remote_from_non_cl_update =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		!Local() &&
+		!g_dedicated_single_import_from_cl_update;
+	if (ignore_remote_from_non_cl_update)
+	{
+		WPN_TRACE("ActorMP::net_Import ignored remote non-M_CL_UPDATE actor=%u slot=%u", ID(), imported_active_slot);
+		return;
+	}
 
 	/*if (m_i_am_dead)
 		return;*/
@@ -49,13 +72,25 @@ void CActorMP::net_Import(NET_Packet& P)
 		SetfRadiation(m_state_holder.state().radiation * 100.0f);
 
 	u16 ActiveSlot = m_state_holder.state().inventory_active_slot;
+	const bool dedicated_single_local_actor_import =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		Local();
 
-	if (OnClient() && (inventory().GetActiveSlot() != ActiveSlot))
+	if (OnClient() && !dedicated_single_local_actor_import && (inventory().GetActiveSlot() != ActiveSlot))
 	{
 #ifdef DEBUG
 		Msg("Client-SetActiveSlot[%d][%d]",ActiveSlot, Device.dwFrame);
 #endif // #ifdef DEBUG
+		WPN_TRACE("ActorMP::net_Import apply active slot actor=%u slot=%u old_slot=%u",
+			ID(), ActiveSlot, inventory().GetActiveSlot());
 		inventory().SetActiveSlot(ActiveSlot);
+	}
+	else if (OnClient() && dedicated_single_local_actor_import && (inventory().GetActiveSlot() != ActiveSlot))
+	{
+		WPN_TRACE("ActorMP::net_Import skip active slot apply for local dedicated-single actor=%u incoming_slot=%u current_slot=%u",
+			ID(), ActiveSlot, inventory().GetActiveSlot());
 	}
 
 	N.mstate = m_state_holder.state().body_state_flags;
@@ -147,7 +182,7 @@ void CActorMP::process_packet(net_update&N)
 
 	if (g_Alive())
 	{
-		setVisible(TRUE);
+		setVisible((BOOL)!HUDview());
 		setEnabled(TRUE);
 	};
 

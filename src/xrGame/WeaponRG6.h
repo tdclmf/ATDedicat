@@ -23,6 +23,8 @@ public:
 protected:
 	virtual void FireStart();
 	virtual u8 AddCartridge(u8 cnt);
+	virtual void ReloadMagazine();
+	void SyncServerRocketsToAmmo();
 
 DECLARE_SCRIPT_REGISTER_FUNCTION
 };

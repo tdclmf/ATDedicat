@@ -8,15 +8,21 @@
 //#include "Physics.h"
 #include "xrServer.h"
 #include "Actor.h"
+#include "actor_mp_client.h"
 #include "Artefact.h"
 #include "ai_space.h"
 #include "saved_game_wrapper.h"
 #include "level_graph.h"
 #include "file_transfer.h"
 #include "message_filter.h"
+#include "weapon_trace.h"
 #include "../xrphysics/iphworld.h"
 
 extern LPCSTR map_ver_string;
+extern ENGINE_API bool g_dedicated_server;
+// True only while processing relayed M_CL_UPDATE for actor import.
+// Dedicated-single bridge uses this to prevent M_UPDATE_OBJECTS from overwriting remote actor orientation.
+bool g_dedicated_single_import_from_cl_update = false;
 
 LPSTR remove_version_option(LPCSTR opt_str, LPSTR new_opt_str, u32 new_opt_str_size)
 {
@@ -150,34 +156,130 @@ void CLevel::ClientReceive()
 			break;
 		case M_CL_UPDATE:
 			{
-				if (OnClient()) break;
+				NET_Packet relay_packet = *P;
 				P->r_u16(ID);
 				u32 Ping = P->r_u32();
 				CGameObject* O = smart_cast<CGameObject*>(Objects.net_Find(ID));
 				if (0 == O) break;
-				O->net_Import(*P);
-				//---------------------------------------------------
-				UpdateDeltaUpd(timeServer());
-				if (pObjects4CrPr.empty() && pActors4CrPr.empty())
-					break;
-				if (!smart_cast<CActor*>(O))
-					break;
 
-				u32 dTime = 0;
-				if ((Level().timeServer() + Ping) < P->timeReceive)
+				const bool is_actor_update = smart_cast<CActor*>(O) != nullptr;
+				Fvector packet_actor_pos;
+				packet_actor_pos.set(0.f, 0.f, 0.f);
+				float packet_actor_model_yaw = 0.f;
+				bool packet_actor_pos_valid = false;
+				if (is_actor_update)
 				{
-#ifdef DEBUG
-					//					Msg("! TimeServer[%d] < TimeReceive[%d]", Level().timeServer(), P->timeReceive);
-#endif
-					dTime = Ping;
+					NET_Packet dbg_packet = *P;
+					const u32 left_bytes = (dbg_packet.B.count > dbg_packet.r_tell()) ? (dbg_packet.B.count - dbg_packet.r_tell()) : 0;
+					const u32 actor_export_min_size = sizeof(float) + sizeof(u32) + sizeof(u8) + sizeof(float) * 4;
+					if (left_bytes >= actor_export_min_size)
+					{
+						float dbg_health = 0.f;
+						u32 dbg_server_time = 0;
+						u8 dbg_flags = 0;
+						dbg_packet.r_float(dbg_health);
+						dbg_packet.r_u32(dbg_server_time);
+						dbg_packet.r_u8(dbg_flags);
+						dbg_packet.r_vec3(packet_actor_pos);
+						dbg_packet.r_float(packet_actor_model_yaw);
+						packet_actor_pos_valid = true;
+					}
 				}
-				else
-					dTime = Level().timeServer() - P->timeReceive + Ping;
-				u32 NumSteps = physics_world()->CalcNumSteps(dTime);
-				SetNumCrSteps(NumSteps);
 
-				O->CrPr_SetActivationStep(u32(physics_world()->StepsNum()) - NumSteps);
-				AddActor_To_Actors4CrPr(O);
+				// Dedicated-single bridge:
+				// relayed client updates can arrive back to clients as M_CL_UPDATE.
+				// Never re-import update for local controlled entity.
+				if (OnClient() && O->Local())
+				{
+					if (is_actor_update)
+						//WPN_TRACE("Level::ClientReceive M_CL_UPDATE skip local actor import actor=%u", O->ID());
+					break;
+				}
+
+				if (is_actor_update)
+				{
+					//WPN_TRACE("Level::ClientReceive M_CL_UPDATE actor=%u local=%d remote=%d ping=%u from_cl_update=%d",
+						//O->ID(), O->Local() ? 1 : 0, O->Remote() ? 1 : 0, Ping,
+						//g_dedicated_single_import_from_cl_update ? 1 : 0);
+				}
+
+				const bool old_cl_update_import = g_dedicated_single_import_from_cl_update;
+				g_dedicated_single_import_from_cl_update = true;
+				O->net_Import(*P);
+				g_dedicated_single_import_from_cl_update = old_cl_update_import;
+
+				if (OnServer())
+				{
+					//---------------------------------------------------
+					UpdateDeltaUpd(timeServer());
+					if (!pObjects4CrPr.empty() || !pActors4CrPr.empty())
+					{
+						if (smart_cast<CActor*>(O))
+						{
+							(void)packet_actor_pos_valid;
+							(void)packet_actor_pos;
+							(void)packet_actor_model_yaw;
+
+							u32 dTime = 0;
+							if ((Level().timeServer() + Ping) < P->timeReceive)
+							{
+#ifdef DEBUG
+								//					Msg("! TimeServer[%d] < TimeReceive[%d]", Level().timeServer(), P->timeReceive);
+#endif
+								dTime = Ping;
+							}
+							else
+								dTime = Level().timeServer() - P->timeReceive + Ping;
+							u32 NumSteps = physics_world()->CalcNumSteps(dTime);
+							SetNumCrSteps(NumSteps);
+
+							O->CrPr_SetActivationStep(u32(physics_world()->StepsNum()) - NumSteps);
+							AddActor_To_Actors4CrPr(O);
+						}
+					}
+
+					// Dedicated-single bridge:
+					// forward actor M_CL_UPDATE to every real client except sender.
+					// This allows peers to receive direct movement/import data.
+					if (g_dedicated_server && Game().Type() == eGameIDSingle && Server)
+					{
+						ClientID source_client;
+						source_client.set(u32(-1));
+						CSE_Abstract* se_actor = Server->ID_to_entity(ID);
+						if (se_actor && se_actor->owner)
+							source_client = se_actor->owner->ID;
+						//WPN_TRACE("Level::ClientReceive relay M_CL_UPDATE actor=%u source_client=0x%08x", ID, source_client.value());
+
+						struct relay_client_update
+						{
+							xrServer* server;
+							NET_Packet* packet;
+							ClientID source;
+
+							relay_client_update(xrServer* sv, NET_Packet* p, ClientID src)
+								: server(sv), packet(p), source(src)
+							{
+							}
+
+							void operator()(IClient* client)
+							{
+								if (!client || client == server->GetServerClient())
+									return;
+								if (client->ID == source)
+									return;
+
+								xrClientData* xr_client = static_cast<xrClientData*>(client);
+								if (!xr_client || !xr_client->net_Ready || !xr_client->flags.bConnected)
+									return;
+
+								server->SendTo(client->ID, *packet, net_flags(FALSE, TRUE));
+							}
+						};
+
+						relay_client_update relayer(Server, &relay_packet, source_client);
+						Server->ForEachClientDo(relayer);
+					}
+				}
 			}
 			break;
 		case M_MOVE_PLAYERS:

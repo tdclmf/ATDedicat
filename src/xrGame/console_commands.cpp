@@ -45,6 +45,7 @@
 #include "cameralook.h"
 #include "character_hit_animations_params.h"
 #include "inventory_upgrade_manager.h"
+#include "weapon_trace.h"
 
 #include "ai_debug_variables.h"
 #include "../xrphysics/console_vars.h"
@@ -103,6 +104,7 @@ extern float f_power_loss_bias;
 extern float f_power_loss_factor;
 BOOL precise_catspaw_dotmarks = false;
 BOOL enable_actortorch_volumetric = true;
+ENGINE_API BOOL g_wpn_trace = TRUE;
 //extern  BOOL	g_old_style_ui_hud;
 
 extern float g_smart_cover_factor;
@@ -138,6 +140,91 @@ extern BOOL pda_map_zoom_in_to_mouse;
 extern BOOL pda_map_zoom_out_to_mouse;
 extern BOOL mouseWheelChangeWeapon;
 extern BOOL mouseWheelInvertZoom;
+
+static bool IsDedicatedSingleClientDebugBridge()
+{
+	return g_pGameLevel &&
+		!g_dedicated_server &&
+		OnClient() &&
+		(Game().Type() == eGameIDSingle);
+}
+
+static bool ForwardDedicatedSingleDebugCommand(LPCSTR command_name, LPCSTR args)
+{
+	if (!IsDedicatedSingleClientDebugBridge() || !command_name || !command_name[0])
+		return false;
+
+	string1024 full_command = {};
+	if (args && args[0])
+		xr_sprintf(full_command, "%s %s", command_name, args);
+	else
+		xr_sprintf(full_command, "%s", command_name);
+
+	NET_Packet P;
+	P.w_begin(M_REMOTE_CONTROL_CMD);
+	P.w_stringZ(full_command);
+	Level().Send(P, net_flags(TRUE, TRUE));
+
+	return true;
+}
+
+static xrClientData* GetDedicatedSingleRaidClient(LPCSTR args)
+{
+	if (!args || !args[0] || !g_pGameLevel || !Level().Server)
+		return nullptr;
+
+	LPCSTR raid_ptr = strstr(args, "raid:");
+	if (!raid_ptr)
+		return nullptr;
+
+	raid_ptr += 5; // strlen("raid:")
+	const u32 raw_client_id = static_cast<u32>(strtoul(raid_ptr, nullptr, 10));
+	ClientID client_id;
+	client_id.set(raw_client_id);
+
+	return Level().Server->ID_to_client(client_id, true);
+}
+
+static CActor* ResolveDedicatedSingleDebugActor(LPCSTR args)
+{
+	CActor* actor = Actor();
+	if (!actor)
+		actor = smart_cast<CActor*>(Level().CurrentControlEntity());
+
+	if (actor || !IsDedicatedSingleClientDebugBridge() || !Level().Server)
+		return actor;
+
+	xrClientData* raid_client = GetDedicatedSingleRaidClient(args);
+	if (!raid_client || !raid_client->ps)
+		return nullptr;
+
+	const u16 game_id = raid_client->ps->GameID;
+	if (game_id == u16(-1))
+		return nullptr;
+
+	return smart_cast<CActor*>(Level().Objects.net_Find(game_id));
+}
+
+static LPCSTR StripRaidSuffix(LPCSTR args, LPSTR out_args, size_t out_args_size)
+{
+	if (!out_args || !out_args_size)
+		return "";
+
+	out_args[0] = 0;
+	if (!args || !args[0])
+		return out_args;
+
+	strncpy_s(out_args, out_args_size, args, _TRUNCATE);
+
+	char* raid_ptr = strstr(out_args, " raid:");
+	if (!raid_ptr)
+		raid_ptr = strstr(out_args, "\traid:");
+	if (raid_ptr)
+		*raid_ptr = 0;
+
+	return out_args;
+}
+
 extern BOOL mouseWheelInvertChangeWeapons;
 extern BOOL monsterStuckFix;
 extern BOOL logTimestamps;
@@ -2385,19 +2472,32 @@ public:
 
 	virtual void	Execute(LPCSTR args)
 	{
+		if (ForwardDedicatedSingleDebugCommand("g_spawn_squad", args))
+			return;
+
+		string1024 clean_args = {};
+		StripRaidSuffix(args, clean_args, sizeof(clean_args));
+
 		int count = 1;
 		char nameSection[128] = {};
-		auto sc = sscanf_s(args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
+		auto sc = sscanf_s(clean_args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
 		if (sc > 2) {
 			Msg("! Failed to parse input");
 			return;
 		}
+
+		CActor* actor = ResolveDedicatedSingleDebugActor(args);
+		const u16 actor_id = actor ? actor->ID() : u16(-1);
+
 		for (size_t i = 0; i < count; i++)
 		{
 			if (ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel))
 			{
 				string256 script_command;
-				xr_sprintf(script_command, "xr_effects.create_squad(db.actor,nil,{\"%s\",\"%s\"})", nameSection, GetNearestSmartName());
+				if (actor_id != u16(-1))
+					xr_sprintf(script_command, "xr_effects.create_squad(level.object_by_id(%u),nil,{\"%s\",\"%s\"})", actor_id, nameSection, GetNearestSmartName());
+				else
+					xr_sprintf(script_command, "xr_effects.create_squad(db.actor,nil,{\"%s\",\"%s\"})", nameSection, GetNearestSmartName());
 
 				ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->add_script(script_command, true, true);
 			}
@@ -2423,14 +2523,18 @@ public:
 	};
 	virtual void Execute(LPCSTR args)
 	{
+		if (ForwardDedicatedSingleDebugCommand("g_spawn", args))
+			return;
+
 		if (!g_pGameLevel)
 			return;
-		if (!Level().CurrentControlEntity())
-			return;
+
+		string1024 clean_args = {};
+		StripRaidSuffix(args, clean_args, sizeof(clean_args));
 
 		int count = 1;
 		char nameSection[128] = {};
-		auto sc = sscanf_s(args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
+		auto sc = sscanf_s(clean_args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
 		if (sc > 2) {
 			Msg("! Failed to parse input");
 			return;
@@ -2446,90 +2550,104 @@ public:
 			Msg("!Failed to load section!");
 			return;
 		}
+
+		CActor* actor = ResolveDedicatedSingleDebugActor(args);
+
 		collide::rq_result RQ;
 		BOOL HasPick = Level().ObjectSpace.RayPick(Device.vCameraPosition, Device.vCameraDirection, 1000.0f, collide::rqtBoth, RQ, Level().CurrentControlEntity());
-		if (HasPick)
+		if (!HasPick)
+			RQ.range = 5.0f;
+
+		Fvector spawn_position;
+		if (IsDedicatedSingleClientDebugBridge() && actor)
 		{
-			for (int i = 0; i < count; i++)
+			spawn_position.set(actor->Position());
+			spawn_position.y += 0.2f;
+		}
+		else
+		{
+			spawn_position.set(Device.vCameraPosition).add(Fvector(Device.vCameraDirection).mul(RQ.range));
+		}
+
+		for (int i = 0; i < count; i++)
+		{
+			CALifeSimulator* Alife = g_ai_space ? const_cast<CALifeSimulator*>(g_ai_space->get_alife()) : NULL;
+			if (Alife && actor)
 			{
-				CALifeSimulator* Alife = g_ai_space ? const_cast<CALifeSimulator*>(g_ai_space->get_alife()) : NULL;
-				if (Alife)
+				if (CSE_Abstract* entity = Alife->spawn_item(nameSection, spawn_position, actor->ai_location().level_vertex_id(), actor->ai_location().game_vertex_id(), ALife::_OBJECT_ID(-1)))
 				{
-					if (CSE_Abstract* entity = Alife->spawn_item(nameSection, Fvector(Device.vCameraPosition).add(Fvector(Device.vCameraDirection).mul(RQ.range)), Actor()->ai_location().level_vertex_id(), Actor()->ai_location().game_vertex_id(), ALife::_OBJECT_ID(-1)))
+					auto alife_object = entity->cast_alife_object();
+					if (alife_object)
+						alife_object->m_flags.set(CSE_ALifeObject::flUsedAI_Locations, FALSE);
+					Fmatrix actormx = actor->XFORM();
+					actormx.k.invert();
+					actormx.getXYZ(entity->o_Angle);
+
+					//if(CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(entity))
+					//	weapon->m_flags.set(CSE_ALifeObject::flUsedAI_Locations,FALSE);
+					auto anomaly = entity->cast_anomalous_zone();
+					if (anomaly)
 					{
-						auto alife_object = entity->cast_alife_object();
-						if (alife_object)
-							alife_object->m_flags.set(CSE_ALifeObject::flUsedAI_Locations, FALSE);
-						Fmatrix actormx = Actor()->XFORM();
-						actormx.k.invert();
-						actormx.getXYZ(entity->o_Angle);
+						CShapeData::shape_def _shape{};
+						_shape.data.sphere.P.set(0.0f, 0.0f, 0.0f);
+						_shape.data.sphere.R = 3;
+						_shape.type = CShapeData::cfSphere;
 
-						//if(CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(entity))
-						//	weapon->m_flags.set(CSE_ALifeObject::flUsedAI_Locations,FALSE);
-						auto anomaly = entity->cast_anomalous_zone();
-						if (anomaly)
+						anomaly->assign_shapes(&_shape, 1);
+						anomaly->m_owner_id = u32(-1);
+						anomaly->m_space_restrictor_type = RestrictionSpace::eRestrictorTypeNone;
+					}
+					if (strstr(nameSection, "m_car"))
+					{
+						if (CSE_ALifeCar* car = smart_cast<CSE_ALifeCar*>(entity))
+							car->set_visual("physics\\vehicles\\kamaz_test.ogf", true);
+					}
+
+					if (CSE_ALifeTrader* trader = smart_cast<CSE_ALifeTrader*>(entity))
+					{
+						if (strstr(nameSection, "m_trader"))
 						{
-							CShapeData::shape_def _shape{};
-							_shape.data.sphere.P.set(0.0f, 0.0f, 0.0f);
-							_shape.data.sphere.R = 3;
-							_shape.type = CShapeData::cfSphere;
-
-							anomaly->assign_shapes(&_shape, 1);
-							anomaly->m_owner_id = u32(-1);
-							anomaly->m_space_restrictor_type = RestrictionSpace::eRestrictorTypeNone;
+							trader->m_story_id = 410;
+							trader->m_ini_string.printf("[logic]\ncfg = scripts\\escape\\esc_trader.ltx");
+							trader->set_visual("actors\\stalker_trader\\stalker_trader_1.ogf", true);
+							trader->set_name_replace("esc_m_trader");
+							trader->set_character_profile("escape_trader");
+							trader->set_specific_character("escape_trader");
+							trader->m_flags.set(CSE_ALifeTrader::flUsedAI_Locations, FALSE);
 						}
-						if (strstr(nameSection, "m_car"))
-						{
-							if (CSE_ALifeCar* car = smart_cast<CSE_ALifeCar*>(entity))
-								car->set_visual("physics\\vehicles\\kamaz_test.ogf", true);
-						}
 
-						if (CSE_ALifeTrader* trader = smart_cast<CSE_ALifeTrader*>(entity))
+						if (strstr(nameSection, "m_lesnik"))
 						{
-							if (strstr(nameSection, "m_trader"))
-							{
-								trader->m_story_id = 410;
-								trader->m_ini_string.printf("[logic]\ncfg = scripts\\escape\\esc_trader.ltx");
-								trader->set_visual("actors\\stalker_trader\\stalker_trader_1.ogf", true);
-								trader->set_name_replace("esc_m_trader");
-								trader->set_character_profile("escape_trader");
-								trader->set_specific_character("escape_trader");
-								trader->m_flags.set(CSE_ALifeTrader::flUsedAI_Locations, FALSE);
-							}
-
-							if (strstr(nameSection, "m_lesnik"))
-							{
-								trader->m_story_id = 515;
-								trader->m_ini_string.printf("[logic]\ncfg = scripts\\red_forest\\red_lesnik_logic.ltx");
-								trader->set_visual("actors\\stalker_lesnik_1\\stalker_lesnik_1.ogf", true);
-								trader->set_name_replace("red_m_lesnik");
-								trader->set_character_profile("red_forester");
-								trader->set_specific_character("red_forester_tech");
-								trader->m_flags.set(CSE_ALifeTrader::flUsedAI_Locations, FALSE);
-							}
-						}
-						if (CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(entity))
-						{
-							weapon->m_addon_flags.set(CSE_ALifeItemWeapon::eWeaponAddonScope | CSE_ALifeItemWeapon::eWeaponAddonSilencer | CSE_ALifeItemWeapon::eWeaponAddonGrenadeLauncher, TRUE);
+							trader->m_story_id = 515;
+							trader->m_ini_string.printf("[logic]\ncfg = scripts\\red_forest\\red_lesnik_logic.ltx");
+							trader->set_visual("actors\\stalker_lesnik_1\\stalker_lesnik_1.ogf", true);
+							trader->set_name_replace("red_m_lesnik");
+							trader->set_character_profile("red_forester");
+							trader->set_specific_character("red_forester_tech");
+							trader->m_flags.set(CSE_ALifeTrader::flUsedAI_Locations, FALSE);
 						}
 					}
-				}
-				else
-				{
-					CSE_Abstract* entity = Level().spawn_item(nameSection, Fvector(Device.vCameraPosition).add(Fvector(Device.vCameraDirection).mul(RQ.range)), u32(-1), u16(-1), true);
 					if (CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(entity))
 					{
 						weapon->m_addon_flags.set(CSE_ALifeItemWeapon::eWeaponAddonScope | CSE_ALifeItemWeapon::eWeaponAddonSilencer | CSE_ALifeItemWeapon::eWeaponAddonGrenadeLauncher, TRUE);
 					}
-
-					// Send
-					NET_Packet			P;
-					entity->Spawn_Write(P, TRUE);
-					Level().Send(P, net_flags(TRUE));
-
-					// Destroy
-					F_entity_Destroy(entity);
 				}
+			}
+			else
+			{
+				CSE_Abstract* entity = Level().spawn_item(nameSection, spawn_position, u32(-1), u16(-1), true);
+				if (CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(entity))
+				{
+					weapon->m_addon_flags.set(CSE_ALifeItemWeapon::eWeaponAddonScope | CSE_ALifeItemWeapon::eWeaponAddonSilencer | CSE_ALifeItemWeapon::eWeaponAddonGrenadeLauncher, TRUE);
+				}
+
+				// Send
+				NET_Packet			P;
+				entity->Spawn_Write(P, TRUE);
+				Level().Send(P, net_flags(TRUE));
+
+				// Destroy
+				F_entity_Destroy(entity);
 			}
 		}
 	}
@@ -2550,14 +2668,18 @@ public:
 	};
 	virtual void Execute(LPCSTR args)
 	{
+		if (ForwardDedicatedSingleDebugCommand("g_spawn_inv", args))
+			return;
+
 		if (!g_pGameLevel)
 			return;
-		if (!Level().CurrentControlEntity())
-			return;
+
+		string1024 clean_args = {};
+		StripRaidSuffix(args, clean_args, sizeof(clean_args));
 
 		int count = 1;
 		char nameSection[128] = {};
-		auto sc = sscanf_s(args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
+		auto sc = sscanf_s(clean_args, "%s %d", nameSection, (unsigned)sizeof(nameSection), &count);
 		if (sc > 2) {
 			Msg("! Failed to parse input");
 			return;
@@ -2573,11 +2695,15 @@ public:
 			Msg("!Failed to load section!");
 			return;
 		}
-		CActor* pCurActor = smart_cast<CActor*>(Level().CurrentControlEntity());
+		CActor* pCurActor = ResolveDedicatedSingleDebugActor(args);
+		if (!pCurActor)
+		{
+			Msg("! Failed to resolve target actor for g_spawn_inv");
+			return;
+		}
 		for (int i = 0; i < count; i++)
 		{
-			if (pCurActor)
-				Level().spawn_item(nameSection, pCurActor->Position(), pCurActor->ai_location().level_vertex_id(), pCurActor->ID());
+			Level().spawn_item(nameSection, pCurActor->Position(), pCurActor->ai_location().level_vertex_id(), pCurActor->ID());
 		}
 	}
 	virtual void fill_tips(vecTips& tips, u32 mode)
@@ -3087,6 +3213,7 @@ void CCC_RegisterCommands()
 
 	psActorFlags.set(AF_AIM_TOGGLE, FALSE);
 	CMD3(CCC_Mask, "wpn_aim_toggle", &psActorFlags, AF_AIM_TOGGLE);
+	CMD4(CCC_Integer, "wpn_trace", &g_wpn_trace, 0, 1);
 	CMD4(CCC_Float, "wpn_degradation", &f_weapon_deterioration, 0.1f, 2.0f);
 	CMD4(CCC_Float, "power_loss_bias", &f_power_loss_bias, 0.0f, 1.0f);
 	CMD4(CCC_Float, "power_loss_factor", &f_power_loss_factor, 0.1f, 3.0f);

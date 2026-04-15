@@ -15,6 +15,7 @@
 #include "luabind/error.hpp"
 #ifdef XRGAME_EXPORTS
 #include "alife_smart_terrain_task.h"
+extern ENGINE_API bool g_dedicated_server;
 #endif //#ifdef XRGAME_EXPORTS
 
 //#define USE_WRITER_READER
@@ -77,9 +78,29 @@ class CALifeSmartTerrainTask;
 		INHERIT_ALIFE
 #endif
 #ifdef XRGAME_EXPORTS
+#define DEFINE_LUA_WRAPPER_METHOD_V0_DEDICATED_FALLBACK(v_func_name)					\
+		virtual void v_func_name()														\
+		{																				\
+			if (g_dedicated_server)													\
+			{																			\
+				this->self_type::inherited::v_func_name();							\
+				return;																	\
+			}																			\
+			try {																		\
+				call_member<void>(this,#v_func_name);									\
+			}																			\
+			catch(...) {																\
+				this->self_type::inherited::v_func_name();							\
+			}																			\
+		}																				\
+		static void v_func_name##_static(inherited* ptr)								\
+		{                                                                               \
+			ptr->self_type::inherited::v_func_name();									\
+		}
+
 #define INHERIT_ONLINE_OFFLINE_GROUP \
 	INHERIT_DYNAMIC_ALIFE \
-	DEFINE_LUA_WRAPPER_METHOD_V0		(update) \
+	DEFINE_LUA_WRAPPER_METHOD_V0_DEDICATED_FALLBACK(update) \
 	DEFINE_LUA_WRAPPER_METHOD_0			(get_current_task,CALifeSmartTerrainTask*)
 #else
 #define INHERIT_ONLINE_OFFLINE_GROUP \

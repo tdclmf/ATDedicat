@@ -54,6 +54,7 @@ public:
 	shared_str m_cdkey_digest;
 	secure_messaging::key_t m_secret_key;
 	s32 m_last_key_sync_request_seed;
+	shared_str m_requested_player_visual;
 
 	xrClientData();
 	virtual ~xrClientData();
@@ -194,7 +195,7 @@ public:
 	void Process_save(NET_Packet& P, ClientID sender);
 	void Process_event(NET_Packet& P, ClientID sender);
 	void Process_event_ownership(NET_Packet& P, ClientID sender, u32 time, u16 ID, BOOL bForced = FALSE);
-	bool Process_event_reject(NET_Packet& P, const ClientID sender, const u32 time, const u16 id_parent, const u16 id_entity, bool send_message = true);
+	bool Process_event_reject(NET_Packet& P, const ClientID sender, const u32 time, const u16 id_parent, const u16 id_entity, bool send_message = true, bool is_launch_rocket = false);
 	bool Process_event_destroy(NET_Packet& P, ClientID sender, u32 time, u16 ID, NET_Packet* pEPack);
 	void Process_event_activate(NET_Packet& P, const ClientID sender, const u32 time, const u16 id_parent, const u16 id_entity, bool send_message = true);
 

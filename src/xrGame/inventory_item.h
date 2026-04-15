@@ -337,6 +337,7 @@ public:
 
 	IC Upgrades_type const& upgardes() const;
 	virtual void Interpolate();
+	void ClearNetInterpolationQueue();
 	float interpolate_states(net_update_IItem const& first, net_update_IItem const& last, SPHNetState& current);
 
 protected:

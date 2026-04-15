@@ -6,6 +6,74 @@
 #include "level.h"
 #include "player_hud.h"
 #include "hudmanager.h"
+#include "inventory_item.h"
+#include "../xrphysics/PhysicsShell.h"
+#include "weapon_trace.h"
+
+namespace
+{
+	void ApplyAuthoritativeRocketLaunchEvent(NET_Packet& P, const u16 rocket_id, LPCSTR owner_name)
+	{
+		u8 launch_flags = 0;
+		Fvector launch_pos{};
+		Fvector launch_vel{};
+		u16 launch_initiator = u16(-1);
+		bool has_pos = false;
+		bool has_vel = false;
+
+		const u32 unread_after_id = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_id >= sizeof(u8))
+			launch_flags = P.r_u8();
+
+		const u32 unread_after_flags = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_flags >= sizeof(Fvector))
+		{
+			P.r_vec3(launch_pos);
+			has_pos = _valid(launch_pos);
+		}
+
+		const u32 unread_after_pos = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_pos >= sizeof(Fvector))
+		{
+			P.r_vec3(launch_vel);
+			has_vel = _valid(launch_vel);
+		}
+		const u32 unread_after_vel = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+		if (unread_after_vel >= sizeof(u16))
+			launch_initiator = P.r_u16();
+
+		CCustomRocket* rocket = smart_cast<CCustomRocket*>(Level().Objects.net_Find(rocket_id));
+		if (!rocket)
+			return;
+
+		Fmatrix launch_xform = rocket->XFORM();
+		if (has_vel && launch_vel.square_magnitude() > EPS)
+		{
+			Fvector launch_dir = launch_vel;
+			launch_dir.normalize_safe();
+			launch_xform.k.set(launch_dir);
+			Fvector::generate_orthonormal_basis(launch_xform.k, launch_xform.j, launch_xform.i);
+		}
+		if (has_pos)
+			launch_xform.c.set(launch_pos);
+		rocket->ApplyAuthoritativeLaunch(launch_xform, launch_vel, has_vel);
+		if (launch_initiator != u16(-1))
+			if (CExplosiveRocket* explosive_rocket = smart_cast<CExplosiveRocket*>(rocket))
+				explosive_rocket->SetInitiator(launch_initiator);
+		if (CInventoryItem* inv_rocket = smart_cast<CInventoryItem*>(rocket))
+			inv_rocket->ClearNetInterpolationQueue();
+
+		WPN_TRACE("WeaponRPG7::ApplyAuthoritativeRocketLaunch owner=%s rocket=%u flags=%u has_pos=%d has_vel=%d initiator=%u pos=(%.3f,%.3f,%.3f) vel=(%.3f,%.3f,%.3f)",
+			owner_name ? owner_name : "<null>",
+			rocket_id,
+			u32(launch_flags),
+			has_pos ? 1 : 0,
+			has_vel ? 1 : 0,
+			u32(launch_initiator),
+			launch_pos.x, launch_pos.y, launch_pos.z,
+			launch_vel.x, launch_vel.y, launch_vel.z);
+	}
+}
 
 CWeaponRPG7::CWeaponRPG7()
 {
@@ -63,8 +131,7 @@ BOOL CWeaponRPG7::net_Spawn(CSE_Abstract* DC)
 	BOOL l_res = inherited::net_Spawn(DC);
 
 	UpdateMissileVisibility();
-	if (iAmmoElapsed && !getCurrentRocket())
-		CRocketLauncher::SpawnRocket(m_sRocketSection, this);
+	SyncServerRocketToAmmo();
 
 	return l_res;
 }
@@ -84,9 +151,7 @@ void CWeaponRPG7::UnloadMagazine(bool spawn_ammo)
 void CWeaponRPG7::ReloadMagazine()
 {
 	inherited::ReloadMagazine();
-
-	if (iAmmoElapsed && !getRocketCount())
-		CRocketLauncher::SpawnRocket(m_sRocketSection.c_str(), this);
+	SyncServerRocketToAmmo();
 }
 
 void CWeaponRPG7::SwitchState(u32 S)
@@ -96,6 +161,11 @@ void CWeaponRPG7::SwitchState(u32 S)
 
 void CWeaponRPG7::FireStart()
 {
+	if (IsPending() || GetState() == eReload || GetNextState() == eReload)
+		return;
+	if (!getRocketCount() || iAmmoElapsed <= 0)
+		return;
+
 	inherited::FireStart();
 }
 
@@ -145,17 +215,23 @@ void CWeaponRPG7::switch2_Fire()
 		d.normalize();
 		d.mul(m_fLaunchSpeed);
 
+		const u16 launched_rocket_id = u16(getCurrentRocket()->ID());
 		CRocketLauncher::LaunchRocket(launch_matrix, d, zero_vel);
 
-		CExplosiveRocket* pGrenade = smart_cast<CExplosiveRocket*>(getCurrentRocket());
+		CExplosiveRocket* pGrenade = smart_cast<CExplosiveRocket*>(Level().Objects.net_Find(launched_rocket_id));
 		VERIFY(pGrenade);
 		pGrenade->SetInitiator(H_Parent()->ID());
 
 		if (OnServer())
 		{
+			CRocketLauncher::DetachRocket(launched_rocket_id, true);
 			NET_Packet P;
 			u_EventGen(P, GE_LAUNCH_ROCKET, ID());
-			P.w_u16(u16(getCurrentRocket()->ID()));
+			P.w_u16(launched_rocket_id);
+			P.w_u8(0);
+			P.w_vec3(launch_matrix.c);
+			P.w_vec3(d);
+			P.w_u16(H_Parent() ? H_Parent()->ID() : u16(-1));
 			u_EventSend(P);
 		}
 	}
@@ -173,6 +249,9 @@ void CWeaponRPG7::OnEvent(NET_Packet& P, u16 type)
 	u16 id;
 	switch (type)
 	{
+	case GE_WPN_AMMO_SYNC:
+		SyncServerRocketToAmmo();
+		break;
 	case GE_OWNERSHIP_TAKE:
 		{
 			P.r_u16(id);
@@ -186,7 +265,11 @@ void CWeaponRPG7::OnEvent(NET_Packet& P, u16 type)
 			P.r_u16(id);
 			CRocketLauncher::DetachRocket(id, bLaunch);
 			if (bLaunch)
+			{
+				if (OnClient())
+					ApplyAuthoritativeRocketLaunchEvent(P, id, cName().c_str());
 				UpdateMissileVisibility();
+			}
 		}
 		break;
 	}
@@ -196,4 +279,13 @@ void CWeaponRPG7::net_Import(NET_Packet& P)
 {
 	inherited::net_Import(P);
 	UpdateMissileVisibility();
+}
+
+void CWeaponRPG7::SyncServerRocketToAmmo()
+{
+	if (!OnServer())
+		return;
+
+	if (iAmmoElapsed > 0 && !getRocketCount())
+		CRocketLauncher::SpawnRocket(m_sRocketSection.c_str(), this);
 }

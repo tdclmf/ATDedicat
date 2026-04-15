@@ -23,6 +23,8 @@
 #include "script_game_object.h"
 #include "player_hud.h"
 #include "HudSound.h"
+#include "game_cl_base.h"
+#include "weapon_trace.h"
 
 #include "../build_config_defines.h"
 #include "WeaponRG6.h"
@@ -34,6 +36,29 @@ float g_gunsnd_indoor = 0.f;
 float g_gunsnd_indoor_volume = 1.f;
 
 extern CUIXml* pWpnScopeXml;
+namespace
+{
+bool IsWeaponMagTraceCmd(u16 cmd)
+{
+	switch (cmd)
+	{
+	case kWPN_FIRE:
+	case kWPN_RELOAD:
+	case kWPN_ZOOM:
+	case kWPN_NEXT:
+	case kWPN_FUNC:
+	case kWPN_FIREMODE_NEXT:
+	case kWPN_FIREMODE_PREV:
+		return true;
+	default:
+		return false;
+	}
+}
+LPCSTR WeaponMagTraceActionName(u16 cmd)
+{
+	return id_to_action_name((EGameActions)cmd);
+}
+}
 
 CWeaponMagazined::CWeaponMagazined(ESoundTypes eSoundType) : CWeapon()
 {
@@ -159,7 +184,7 @@ void CWeaponMagazined::Load(LPCSTR section)
 
 	m_sSndShotCurrent = IsSilencerAttached() ? "sndSilencerShot" : "sndShot";
 
-	//звуки и партиклы глушителя, еслит такой есть
+	//����� � �������� ���������, ����� ����� ����
 	if (m_eSilencerStatus == ALife::eAddonAttachable || m_eSilencerStatus == ALife::eAddonPermanent)
 	{
 		if (pSettings->line_exist(section, "silencer_flame_particles"))
@@ -423,7 +448,7 @@ int CWeaponMagazined::CheckAmmoBeforeReload(u8& v_ammoType)
 	{
 		for (u8 i = 0; i < u8(m_ammoTypes.size()); ++i)
 		{
-			//проверить патроны всех подходящих типов
+			//��������� ������� ���� ���������� �����
 			ammo = smart_cast<CWeaponAmmo*>(m_pInventory->GetAny(m_ammoTypes[i].c_str()));
 			if (ammo)
 			{
@@ -499,7 +524,7 @@ void CWeaponMagazined::ReloadMagazine()
 	m_needReload = false;
 	m_BriefInfo_CalcFrame = 0;
 
-	//устранить осечку при перезарядке
+	//��������� ������ ��� �����������
 	if (IsMisfire())
 	{
 		bMisfire = false;
@@ -548,14 +573,14 @@ void CWeaponMagazined::ReloadMagazine()
 		if (!tmp_sect_name)
 			return;
 
-		//попытаться найти в инвентаре патроны текущего типа
+		//���������� ����� � ��������� ������� �������� ����
 		m_pCurrentAmmo = smart_cast<CWeaponAmmo*>(m_pInventory->GetAny(tmp_sect_name));
 
 		if (!m_pCurrentAmmo && !m_bLockType && iAmmoElapsed == 0)
 		{
 			for (u8 i = 0; i < u8(m_ammoTypes.size()); ++i)
 			{
-				//проверить патроны всех подходящих типов
+				//��������� ������� ���� ���������� �����
 				m_pCurrentAmmo = smart_cast<CWeaponAmmo*>(m_pInventory->GetAny(m_ammoTypes[i].c_str()));
 				if (m_pCurrentAmmo)
 				{
@@ -566,10 +591,10 @@ void CWeaponMagazined::ReloadMagazine()
 		}
 	}
 
-	//нет патронов для перезарядки
+	//��� �������� ��� �����������
 	if (!m_pCurrentAmmo && !unlimited_ammo()) return;
 
-	//разрядить магазин, если загружаем патронами другого типа
+	//��������� �������, ���� ��������� ��������� ������� ����
 	if (!m_bLockType && !m_magazine.empty() &&
 		(!m_pCurrentAmmo || xr_strcmp(m_pCurrentAmmo->cNameSect(),
 		                              *m_magazine.back().m_ammoSect)))
@@ -593,7 +618,7 @@ void CWeaponMagazined::ReloadMagazine()
 
 	VERIFY((u32) iAmmoElapsed == m_magazine.size());
 
-	//выкинуть коробку патронов, если она пустая
+	//�������� ������� ��������, ���� ��� ������
 	if (m_pCurrentAmmo && !m_pCurrentAmmo->m_boxCurr && OnServer())
 		m_pCurrentAmmo->SetDropManual(TRUE);
 
@@ -680,8 +705,8 @@ void CWeaponMagazined::UpdateCL()
 	inherited::UpdateCL();
 	float dt = Device.fTimeDelta;
 
-	//когда происходит апдейт состояния оружия
-	//ничего другого не делать
+	//����� ���������� ������ ��������� ������
+	//������ ������� �� ������
 	if (GetNextState() == GetState())
 	{
 		switch (GetState())
@@ -948,10 +973,10 @@ void CWeaponMagazined::OnShot()
 	PHGetLinearVell(vel);
 	OnShellDrop(get_LastSP(), vel);
 
-	// Огонь из ствола
+	// ����� �� ������
 	StartFlameParticles();
 
-	//дым из ствола
+	//��� �� ������
 	ForceUpdateFireParticles();
 
 	StartSmokeParticles(get_LastFP(), vel);
@@ -962,7 +987,7 @@ void CWeaponMagazined::OnShot()
 		object->callback(GameObject::eOnWeaponFired)(object->lua_game_object(), this->lua_game_object(), iAmmoElapsed);
 #endif
 
-	// Эффект сдвига (отдача)
+	// ������ ������ (������)
 	AddHUDShootingEffect();
 }
 
@@ -1001,24 +1026,46 @@ void CWeaponMagazined::OnEmptyClick()
 
 void CWeaponMagazined::OnAnimationEnd(u32 state)
 {
+	WPN_TRACE("WeaponMagazined::OnAnimationEnd weapon=%s state=%u current=%u next=%u ammo=%d working=%d pending=%d need_reload=%d",
+		cName().c_str(), state, GetState(), GetNextState(), iAmmoElapsed, IsWorking() ? 1 : 0, IsPending() ? 1 : 0, m_needReload ? 1 : 0);
 	switch (state)
 	{
-	case eReload: if (m_needReload) ReloadMagazine();
+	case eReload:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eReload weapon=%s need_reload=%d", cName().c_str(), m_needReload ? 1 : 0);
+		if (m_needReload)
+			ReloadMagazine();
 		SwitchState(eIdle);
-		break; // End of reload animation
-	case eHiding: SwitchState(eHidden);
+		SetPending(FALSE);
+		break;
+	case eHiding:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eHiding -> eHidden weapon=%s", cName().c_str());
+		SwitchState(eHidden);
 		break; // End of Hide
-	case eShowing: SwitchState(eIdle);
+	case eShowing:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eShowing -> eIdle weapon=%s", cName().c_str());
+		SwitchState(eIdle);
 		break; // End of Show
-	case eIdle: switch2_Idle();
+	case eIdle:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eIdle -> switch2_Idle weapon=%s", cName().c_str());
+		switch2_Idle();
 		break; // Keep showing idle
-	case eFire: 
+	case eFire:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eFire weapon=%s working=%d ammo=%d", cName().c_str(), bWorking ? 1 : 0, iAmmoElapsed);
 		if (!bWorking || 0 == iAmmoElapsed)
 			SwitchState(eIdle);
 		break; // Switch to idle if we stopped shooting
-	case eAimStart: SwitchState(eIdle);		break;
-	case eAimEnd:   SwitchState(eIdle);		break;
-	case eSwitchMode: UpdateFireMode();
+	case eAimStart:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eAimStart -> eIdle weapon=%s", cName().c_str());
+		SwitchState(eIdle);
+		break;
+	case eAimEnd:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eAimEnd -> eIdle weapon=%s", cName().c_str());
+		SwitchState(eIdle);
+		break;
+	case eSwitchMode:
+		WPN_TRACE("WeaponMagazined::OnAnimationEnd eSwitchMode weapon=%s current_mode=%d next_dir=%d",
+			cName().c_str(), GetCurrentFireMode(), m_nextFireMode ? 1 : 0);
+		UpdateFireMode();
 		SwitchState(eIdle);
 		break; // Back to idle
 	}
@@ -1027,12 +1074,17 @@ void CWeaponMagazined::OnAnimationEnd(u32 state)
 
 void CWeaponMagazined::UpdateFireMode()
 {
+	const s8 prev_mode = GetCurrentFireMode();
 	m_iCurFireMode = (m_iCurFireMode + (m_nextFireMode ? 1 : -1) + m_aFireModes.size()) % m_aFireModes.size();
 	SetQueueSize(GetCurrentFireMode());
+	WPN_TRACE("WeaponMagazined::UpdateFireMode weapon=%s prev=%d new=%d next_dir=%d queue=%d",
+		cName().c_str(), prev_mode, GetCurrentFireMode(), m_nextFireMode ? 1 : 0, m_iQueueSize);
 }
 
 void CWeaponMagazined::switch2_Idle()
 {
+	WPN_TRACE("WeaponMagazined::switch2_Idle weapon=%s ammo=%d old_bullet_speed=%.3f",
+		cName().c_str(), iAmmoElapsed, m_fOldBulletSpeed);
 	m_iShotNum = 0;
 	if (m_fOldBulletSpeed != 0.f)
 		SetBulletSpeed(m_fOldBulletSpeed);
@@ -1049,14 +1101,48 @@ void CWeaponMagazined::switch2_Fire()
 {
 	CInventoryOwner* io = smart_cast<CInventoryOwner*>(H_Parent());
 	if (!io)
+	{
+		WPN_TRACE("WeaponMagazined::switch2_Fire aborted: no inventory owner weapon=%s", cName().c_str());
 		return;
+	}
 
 	CInventoryItem* ii = smart_cast<CInventoryItem*>(this);
+	CActor* actor_owner = smart_cast<CActor*>(H_Parent());
+	game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+	const bool local_player_id_match =
+		game_cl && game_cl->local_player && actor_owner &&
+		(game_cl->local_player->GameID == actor_owner->ID());
+	const bool dedicated_single_local_actor =
+		actor_owner &&
+		!g_dedicated_server &&
+		OnClient() &&
+		(local_player_id_match || Level().CurrentControlEntity() == actor_owner || Level().CurrentEntity() == actor_owner);
+	WPN_TRACE("WeaponMagazined::switch2_Fire weapon=%s actor=%u local=%d on_client=%d on_server=%d dedicated_single_local=%d active_item=%s",
+		cName().c_str(), actor_owner ? actor_owner->ID() : u16(-1), Local() ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0,
+		dedicated_single_local_actor ? 1 : 0,
+		io->inventory().ActiveItem() ? io->inventory().ActiveItem()->object().cName().c_str() : "<none>");
+
 	if (ii != io->inventory().ActiveItem())
 	{
-		Msg("WARNING: Not an active item, item %s, owner %s, active item %s", *cName(), *H_Parent()->cName(),
-		    io->inventory().ActiveItem() ? *io->inventory().ActiveItem()->object().cName() : "no_active_item");
-		return;
+		if (dedicated_single_local_actor)
+		{
+			const u16 slot_id = ii->CurrSlot();
+			WPN_TRACE("WeaponMagazined::switch2_Fire local bridge activate slot weapon=%s slot=%u", cName().c_str(), slot_id);
+			io->inventory().SetActiveSlot(slot_id);
+			PIItem slot_item = io->inventory().ItemFromSlot(slot_id);
+			if (slot_item && slot_item == ii)
+				ii->ActivateItem();
+		}
+
+		if (ii != io->inventory().ActiveItem())
+		{
+			WPN_TRACE("WeaponMagazined::switch2_Fire aborted: not active item weapon=%s owner=%s active_item=%s",
+				cName().c_str(), H_Parent() ? H_Parent()->cName().c_str() : "<none>",
+				io->inventory().ActiveItem() ? io->inventory().ActiveItem()->object().cName().c_str() : "<none>");
+			Msg("WARNING: Not an active item, item %s, owner %s, active item %s", *cName(), *H_Parent()->cName(),
+			    io->inventory().ActiveItem() ? *io->inventory().ActiveItem()->object().cName() : "no_active_item");
+			return;
+		}
 	}
 #ifdef DEBUG
     if (!(io && (ii == io->inventory().ActiveItem())))
@@ -1074,9 +1160,21 @@ void CWeaponMagazined::switch2_Fire()
 	m_bStopedAfterQueueFired = false;
 	m_bFireSingleShot = true;
 	m_iShotNum = 0;
+	WPN_TRACE("WeaponMagazined::switch2_Fire prepared weapon=%s state=%u working=%d ammo=%d",
+		cName().c_str(), GetState(), IsWorking() ? 1 : 0, iAmmoElapsed);
 
-	if ((OnClient() || Level().IsDemoPlay()) && !IsWorking())
+	// Dedicated server in this fork must execute fire logic too, otherwise
+	// server-side traces/condition updates are never produced for other clients.
+	if ((OnClient() || Level().IsDemoPlay() || g_dedicated_server) && !IsWorking())
+	{
+		WPN_TRACE("WeaponMagazined::switch2_Fire -> FireStart weapon=%s", cName().c_str());
 		FireStart();
+	}
+	else
+	{
+		WPN_TRACE("WeaponMagazined::switch2_Fire skip FireStart weapon=%s on_client=%d demo=%d working=%d",
+			cName().c_str(), OnClient() ? 1 : 0, Level().IsDemoPlay() ? 1 : 0, IsWorking() ? 1 : 0);
+	}
 }
 
 void CWeaponMagazined::PlayReloadSound()
@@ -1147,9 +1245,36 @@ void CWeaponMagazined::PlayReloadSound()
 
 void CWeaponMagazined::switch2_Reload()
 {
+	WPN_TRACE("WeaponMagazined::switch2_Reload weapon=%s ammo=%d mag_size=%d misfire=%d",
+		cName().c_str(), iAmmoElapsed, iMagazineSize, IsMisfire() ? 1 : 0);
 	CWeapon::FireEnd();
+	SetAwaitingLocalAmmoSyncAfterReload(false);
 
 	m_needReload = true;
+	if (g_dedicated_server)
+	{
+		if (ParentIsActor())
+		{
+			// In dedicated MP, actor-owned weapon ammo is synchronized from the owning client.
+			// Instant server-side refill lets fire sneak through during client reload animation.
+			m_needReload = false;
+			SetPending(FALSE);
+			SetAwaitingLocalAmmoSyncAfterReload(true);
+			WPN_TRACE("WeaponMagazined::switch2_Reload dedicated defer to client ammo sync weapon=%s ammo=%d",
+				cName().c_str(), iAmmoElapsed);
+			SwitchState(eIdle);
+			return;
+		}
+
+		ReloadMagazine();
+		SetPending(FALSE);
+		SetAwaitingLocalAmmoSyncAfterReload(false);
+		WPN_TRACE("WeaponMagazined::switch2_Reload dedicated immediate eIdle weapon=%s ammo=%d",
+			cName().c_str(), iAmmoElapsed);
+		SwitchState(eIdle);
+		return;
+	}
+
 	PlayReloadSound();
 	PlayAnimReload();
 	SetPending(TRUE);
@@ -1157,6 +1282,7 @@ void CWeaponMagazined::switch2_Reload()
 
 void CWeaponMagazined::switch2_Hiding()
 {
+	WPN_TRACE("WeaponMagazined::switch2_Hiding weapon=%s state=%u next=%u", cName().c_str(), GetState(), GetNextState());
 	OnZoomOut();
 	CWeapon::FireEnd();
 
@@ -1174,6 +1300,7 @@ void CWeaponMagazined::switch2_Hiding()
 
 void CWeaponMagazined::switch2_Hidden()
 {
+	WPN_TRACE("WeaponMagazined::switch2_Hidden weapon=%s", cName().c_str());
 	CWeapon::FireEnd();
 
 	StopCurrentAnimWithoutCallback();
@@ -1184,6 +1311,8 @@ void CWeaponMagazined::switch2_Hidden()
 
 void CWeaponMagazined::switch2_Showing()
 {
+	WPN_TRACE("WeaponMagazined::switch2_Showing weapon=%s parent_is_actor=%d dedicated=%d",
+		cName().c_str(), ParentIsActor() ? 1 : 0, g_dedicated_server ? 1 : 0);
 	if (ParentIsActor() && !g_dedicated_server)
 		g_player_hud->attach_item(this);
 
@@ -1194,6 +1323,15 @@ void CWeaponMagazined::switch2_Showing()
 		else
 			PlaySound("sndShow", get_LastFP());
 	}
+	// Dedicated server has no HUD animation playback, so showing would stay pending forever.
+	// Advance state machine immediately to idle to keep fire/reload logic unblocked.
+	if (g_dedicated_server)
+	{
+		SetPending(FALSE);
+		WPN_TRACE("WeaponMagazined::switch2_Showing dedicated immediate eIdle weapon=%s", cName().c_str());
+		SwitchState(eIdle);
+		return;
+	}
 
 	SetPending(TRUE);
 	PlayAnimShow();
@@ -1201,23 +1339,51 @@ void CWeaponMagazined::switch2_Showing()
 
 bool CWeaponMagazined::Action(u16 cmd, u32 flags)
 {
-	if (inherited::Action(cmd, flags)) return true;
+	const bool trace = IsWeaponMagTraceCmd(cmd);
+	if (trace)
+	{
+		WPN_TRACE("WeaponMagazined::Action weapon=%s cmd=%d(%s) flags=0x%08x state=%u next=%u pending=%d ammo=%d mag=%d",
+			cName().c_str(), cmd, WeaponMagTraceActionName(cmd), flags, GetState(), GetNextState(), IsPending() ? 1 : 0, iAmmoElapsed, iMagazineSize);
+	}
 
-	//если оружие чем-то занято, то ничего не делать
-	if (IsPending()) return false;
+	if (inherited::Action(cmd, flags))
+	{
+		if (trace)
+			WPN_TRACE("WeaponMagazined::Action consumed by inherited weapon=%s cmd=%d", cName().c_str(), cmd);
+		return true;
+	}
+
+	//���� ������ ���-�� ������, �� ������ �� ������
+	if (IsPending())
+	{
+		if (trace)
+			WPN_TRACE("WeaponMagazined::Action blocked: pending weapon=%s cmd=%d", cName().c_str(), cmd);
+		return false;
+	}
 
 	switch (cmd)
 	{
 	case kWPN_RELOAD:
 		{
-		if (flags & CMD_START)
+			if (flags & CMD_START)
 			{
+				if (trace)
+					WPN_TRACE("WeaponMagazined::Action reload start weapon=%s safemode=%d ammo=%d mag=%d misfire=%d",
+						cName().c_str(), (ParentIsActor() && Actor()->is_safemode()) ? 1 : 0, iAmmoElapsed, iMagazineSize, IsMisfire() ? 1 : 0);
 				if (ParentIsActor() && Actor()->is_safemode())
 					Actor()->set_safemode(false);
 
 				if (iAmmoElapsed < iMagazineSize || IsMisfire())
+				{
+					if (trace)
+						WPN_TRACE("WeaponMagazined::Action reload accepted weapon=%s", cName().c_str());
 					Reload();
+				}
+				else if (trace)
+					WPN_TRACE("WeaponMagazined::Action reload skipped: magazine full and no misfire weapon=%s", cName().c_str());
 			}
+			else if (trace)
+				WPN_TRACE("WeaponMagazined::Action reload ignored: not CMD_START weapon=%s flags=0x%08x", cName().c_str(), flags);
 		}
 		return true;
 	case kWPN_FIREMODE_PREV:
@@ -1225,9 +1391,12 @@ bool CWeaponMagazined::Action(u16 cmd, u32 flags)
 			if (flags & CMD_START)
 			{
 				m_nextFireMode = false;
+				WPN_TRACE("WeaponMagazined::Action firemode prev weapon=%s", cName().c_str());
 				PlayAnimFireModeSwitch();
 				return true;
 			};
+			if (trace)
+				WPN_TRACE("WeaponMagazined::Action firemode prev ignored: not CMD_START weapon=%s flags=0x%08x", cName().c_str(), flags);
 		}
 		break;
 	case kWPN_FIREMODE_NEXT:
@@ -1235,30 +1404,52 @@ bool CWeaponMagazined::Action(u16 cmd, u32 flags)
 			if (flags & CMD_START)
 			{
 				m_nextFireMode = true;
+				WPN_TRACE("WeaponMagazined::Action firemode next weapon=%s", cName().c_str());
 				PlayAnimFireModeSwitch();
 				return true;
 			};
+			if (trace)
+				WPN_TRACE("WeaponMagazined::Action firemode next ignored: not CMD_START weapon=%s flags=0x%08x", cName().c_str(), flags);
 		}
 		break;
 	}
+
+	if (trace)
+		WPN_TRACE("WeaponMagazined::Action not handled weapon=%s cmd=%d", cName().c_str(), cmd);
 	return false;
 }
 
 void CWeaponMagazined::PlayAnimFireModeSwitch()
 {
-	if (!m_bHasDifferentFireModes) return;
-	if (m_aFireModes.size() <= 1) return;
-	if (GetState() != eIdle) return;
+	if (!m_bHasDifferentFireModes)
+	{
+		WPN_TRACE("WeaponMagazined::PlayAnimFireModeSwitch blocked: no fire modes weapon=%s", cName().c_str());
+		return;
+	}
+	if (m_aFireModes.size() <= 1)
+	{
+		WPN_TRACE("WeaponMagazined::PlayAnimFireModeSwitch blocked: one mode weapon=%s", cName().c_str());
+		return;
+	}
+	if (GetState() != eIdle)
+	{
+		WPN_TRACE("WeaponMagazined::PlayAnimFireModeSwitch blocked: state=%u weapon=%s", GetState(), cName().c_str());
+		return;
+	}
 
 	if (HudAnimationExist("anm_switch_mode"))
 	{
 		SetPending(TRUE);
+		WPN_TRACE("WeaponMagazined::PlayAnimFireModeSwitch play anim weapon=%s ammo=%d", cName().c_str(), iAmmoElapsed);
 		iAmmoElapsed == 0 && HudAnimationExist("anm_switch_mode_empty")
 			? PlayHUDMotion("anm_switch_mode_empty", TRUE, this, eSwitchMode)
 			: PlayHUDMotion("anm_switch_mode", TRUE, this, eSwitchMode);
 	}
 	else
+	{
+		WPN_TRACE("WeaponMagazined::PlayAnimFireModeSwitch no anim -> UpdateFireMode weapon=%s", cName().c_str());
 		UpdateFireMode();
+	}
 
 	if (m_sounds.FindSoundItem("sndSwitchMode", false))
 		PlaySound("sndSwitchMode", get_LastFP());
@@ -1437,7 +1628,7 @@ bool CWeaponMagazined::Attach(PIItem pIItem, bool b_send_event)
 	{
 		if (b_send_event && OnServer())
 		{
-			//уничтожить подсоединенную вещь из инвентаря
+			//���������� �������������� ���� �� ���������
 			//.			pIItem->Drop					();
 			pIItem->object().DestroyObject();
 		};
@@ -2130,7 +2321,7 @@ bool CWeaponMagazined::install_upgrade_impl(LPCSTR section, bool test)
 	return result;
 }
 
-//текущая дисперсия (в радианах) оружия с учетом используемого патрона и недисперсионных пуль
+//������� ��������� (� ��������) ������ � ������ ������������� ������� � ��������������� ����
 float CWeaponMagazined::GetFireDispersion(float cartridge_k, bool for_crosshair)
 {
 	float fire_disp = GetBaseDispersion(cartridge_k);

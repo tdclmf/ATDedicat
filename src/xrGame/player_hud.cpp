@@ -223,6 +223,8 @@ void attachable_hud_item::set_bone_visible(const shared_str& bone_name, BOOL bVi
 void attachable_hud_item::update(bool bForce)
 {
 	if (!bForce && m_upd_firedeps_frame == Device.dwFrame) return;
+	if (!m_parent || !m_model || !m_parent_hud_item)
+		return;
 	bool is_16x9 = UI().is_widescreen();
 
 	if (!!m_measures.m_prop_flags.test(hud_item_measures::e_16x9_mode_now) != is_16x9)
@@ -234,22 +236,25 @@ void attachable_hud_item::update(bool bForce)
 	m_attach_offset.translate_over(m_parent->m_adjust_mode ? m_parent->m_adjust_obj[0] : m_measures.m_item_attach[0]);
 
 	if (m_attach_place_idx == SCOPE_ATTACH_IDX) {
-		m_item_transform.set(m_parent->attached_item(0)->m_item_transform);
+		attachable_hud_item* base_item = m_parent->attached_item(0);
+		if (!base_item)
+			return;
+		m_item_transform.set(base_item->m_item_transform);
 
 		Fmatrix hud_rotation;
 		hud_rotation.identity();
-		hud_rotation.rotateX(m_parent->attached_item(0)->attach_mount_offset_rot().x);
+		hud_rotation.rotateX(base_item->attach_mount_offset_rot().x);
 
 		Fmatrix hud_rotation_y;
 		hud_rotation_y.identity();
-		hud_rotation_y.rotateY(m_parent->attached_item(0)->attach_mount_offset_rot().y);
+		hud_rotation_y.rotateY(base_item->attach_mount_offset_rot().y);
 		hud_rotation.mulA_43(hud_rotation_y);
 
 		hud_rotation_y.identity();
-		hud_rotation_y.rotateZ(m_parent->attached_item(0)->attach_mount_offset_rot().z);
+		hud_rotation_y.rotateZ(base_item->attach_mount_offset_rot().z);
 		hud_rotation.mulA_43(hud_rotation_y);
 
-		hud_rotation.translate_over(m_parent->attached_item(0)->attach_mount_offset_pos());
+		hud_rotation.translate_over(base_item->attach_mount_offset_pos());
 		m_item_transform.mulB_43(hud_rotation);
 	}
 	else {

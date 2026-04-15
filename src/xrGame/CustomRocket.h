@@ -82,6 +82,8 @@ public:
 	virtual void SetLaunchParams(const Fmatrix& xform,
 	                             const Fvector& vel,
 	                             const Fvector& angular_vel);
+	// Re-applies launch state from a server-authoritative network event.
+	void ApplyAuthoritativeLaunch(const Fmatrix& xform, const Fvector& vel, bool has_velocity);
 
 	virtual void OnEvent(NET_Packet& P, u16 type);
 	bool m_bLaunched;

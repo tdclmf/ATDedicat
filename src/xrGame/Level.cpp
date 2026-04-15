@@ -55,6 +55,7 @@
 #include "UICursor.h"
 #include "debug_renderer.h"
 #include "LevelDebugScript.h"
+#include "weapon_trace.h"
 
 #ifdef DEBUG
 #include "level_debug.h"
@@ -345,12 +346,41 @@ int CLevel::get_RPID(LPCSTR /**name/**/)
 
 bool g_bDebugEvents = false;
 
+namespace
+{
+bool IsWeaponTraceEventType(u16 type)
+{
+	switch (type)
+	{
+	case GE_INV_ACTION:
+	case GE_WPN_STATE_CHANGE:
+	case GE_WPN_AMMO_SYNC:
+	case GEG_PLAYER_ITEM2SLOT:
+	case GEG_PLAYER_ITEM2RUCK:
+	case GEG_PLAYER_ITEM2BELT:
+	case GEG_PLAYER_ACTIVATE_SLOT:
+	case GEG_PLAYER_DISABLE_SPRINT:
+	case GEG_PLAYER_WEAPON_HIDE_STATE:
+	case GEG_PLAYER_ITEM_EAT:
+		return true;
+	default:
+		return false;
+	}
+}
+}
+
 void CLevel::cl_Process_Event(u16 dest, u16 type, NET_Packet& P)
 {
 	// Msg("--- event[%d] for [%d]",type,dest);
+	if (IsWeaponTraceEventType(type))
+	{
+		WPN_TRACE("Level::cl_Process_Event dest=%u type=%u", dest, type);
+	}
 	CObject* O = Objects.net_Find(dest);
 	if (0 == O)
 	{
+		if (IsWeaponTraceEventType(type))
+			WPN_TRACE("Level::cl_Process_Event drop: unknown dest=%u type=%u", dest, type);
 #ifdef DEBUG
         Msg("* WARNING: c_EVENT[%d] to [%d]: unknown dest", type, dest);
 #endif
@@ -359,6 +389,8 @@ void CLevel::cl_Process_Event(u16 dest, u16 type, NET_Packet& P)
 	CGameObject* GO = smart_cast<CGameObject*>(O);
 	if (!GO)
 	{
+		if (IsWeaponTraceEventType(type))
+			WPN_TRACE("Level::cl_Process_Event drop: non-game-object dest=%u type=%u", dest, type);
 #ifndef MASTER_GOLD
         Msg("! ERROR: c_EVENT[%d] : non-game-object", dest);
 #endif
@@ -370,6 +402,8 @@ void CLevel::cl_Process_Event(u16 dest, u16 type, NET_Packet& P)
 		{
 			Game().OnDestroy(GO);
 		}
+		if (IsWeaponTraceEventType(type))
+			WPN_TRACE("Level::cl_Process_Event dispatch object=%u(%s) type=%u", GO->ID(), GO->cName().c_str(), type);
 		GO->OnEvent(P, type);
 	}
 	else
@@ -395,6 +429,8 @@ void CLevel::cl_Process_Event(u16 dest, u16 type, NET_Packet& P)
 #endif
 			ok = false;
 		}
+		if (IsWeaponTraceEventType(type))
+			WPN_TRACE("Level::cl_Process_Event GE_DESTROY_REJECT owner=%u reject_id=%u ok=%d", GO->ID(), id, ok ? 1 : 0);
 		GO->OnEvent(P, GE_OWNERSHIP_REJECT);
 		if (ok)
 		{
@@ -451,6 +487,10 @@ void CLevel::ProcessGameEvents()
 		{
 			u16 ID, dest, type;
 			game_events->get(ID, dest, type, P);
+			if (ID == M_EVENT && IsWeaponTraceEventType(type))
+			{
+				WPN_TRACE("Level::ProcessGameEvents M_EVENT dequeued dest=%u type=%u", dest, type);
+			}
 			//AVO: spawn antifreeze implementation by alpet
 #ifdef SPAWN_ANTIFREEZE
 			// не отправлять события не заспавненным объектам
@@ -724,7 +764,7 @@ void CLevel::UI_AND_PHCommanders()
 		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
 	if (m_ph_commander)
 		m_ph_commander->update();
-	if (m_ph_commander_scripts)
+	if (!g_dedicated_server && m_ph_commander_scripts)
 		m_ph_commander_scripts->update();
 }
 

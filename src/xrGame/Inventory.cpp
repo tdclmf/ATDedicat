@@ -21,11 +21,14 @@
 #include "ai_space.h"
 #include "entitycondition.h"
 #include "game_base_space.h"
+#include "game_cl_base.h"
 #include "uigamecustom.h"
 #include "clsid_game.h"
 #include "static_cast_checked.hpp"
 #include "player_hud.h"
 #include "PDA.h"
+#include "weapon_trace.h"
+#include "../xrEngine/CameraBase.h"
 
 using namespace InventoryUtilities;
 //Alundaio
@@ -38,6 +41,48 @@ u16 INV_STATE_CAR = INV_STATE_LADDER;
 u16 INV_STATE_BLOCK_ALL = 0xffff;
 u16 INV_STATE_INV_WND = INV_STATE_BLOCK_ALL;
 u16 INV_STATE_BUY_MENU = INV_STATE_BLOCK_ALL;
+
+static bool IsWeaponTraceCmd(u16 cmd)
+{
+	switch (cmd)
+	{
+	case kWPN_1:
+	case kWPN_2:
+	case kWPN_3:
+	case kWPN_4:
+	case kWPN_5:
+	case kWPN_6:
+	case kWPN_FIRE:
+	case kWPN_RELOAD:
+	case kWPN_ZOOM:
+	case kWPN_NEXT:
+	case kWPN_FUNC:
+	case kWPN_FIREMODE_NEXT:
+	case kWPN_FIREMODE_PREV:
+	case kNEXT_SLOT:
+	case kPREV_SLOT:
+	case kDROP:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static LPCSTR InventoryTraceActionName(u16 cmd)
+{
+	return id_to_action_name((EGameActions)cmd);
+}
+
+static bool IsDedicatedSingleLocalInventoryActor(const CActor* actor)
+{
+	if (!g_pGameLevel || !actor || g_dedicated_server || !OnClient())
+		return false;
+	game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+	const bool local_player_id_match =
+		game_cl && game_cl->local_player && game_cl->local_player->GameID == actor->ID();
+
+	return local_player_id_match || Level().CurrentControlEntity() == actor || Level().CurrentEntity() == actor;
+}
 
 CInventorySlot::CInventorySlot()
 {
@@ -324,20 +369,48 @@ bool CInventory::DropItem(CGameObject* pObj, bool just_before_destroy, bool dont
 		if (Level().CurrentViewEntity() == pActor_owner)
 			CurrentGameUI()->OnInventoryAction(pIItem, GE_OWNERSHIP_REJECT);
 	};
+
+	const bool pure_client = OnClient() && !OnServer();
+	const bool final_dont_create_shell = dont_create_shell;
+	WPN_TRACE("Inventory::DropItem owner=%s item=%s on_client=%d on_server=%d pure_client=%d dont_create_shell_in=%d dont_create_shell_final=%d",
+		m_pOwner ? m_pOwner->Name() : "<null>",
+		pObj ? pObj->cName().c_str() : "<null>",
+		OnClient() ? 1 : 0,
+		OnServer() ? 1 : 0,
+		pure_client ? 1 : 0,
+		dont_create_shell ? 1 : 0,
+		final_dont_create_shell ? 1 : 0);
+
 	if (smart_cast<CWeapon*>(pObj))
 	{
-		Fvector dir = Actor()->Direction();
-		dir.y = sin(-45.f * PI / 180.f);
-		dir.normalize();
-		smart_cast<CWeapon*>(pObj)->SetActivationSpeedOverride(dir.mul(7));
-		pObj->H_SetParent(nullptr, dont_create_shell);
+		CWeapon* dropped_weapon = smart_cast<CWeapon*>(pObj);
+		// Keep monolith-like throw speed for non-dedicated paths.
+		// Dedicated server receives authoritative throw vector in xrServer::Process_event_reject.
+		if (!OnServer() || !g_dedicated_server)
+		{
+			Fvector dir;
+			if (Actor())
+				dir = Actor()->Direction();
+			else
+				dir.set(0.f, 0.f, 1.f);
+
+			dir.y = sin(-45.f * PI / 180.f);
+			if (dir.square_magnitude() < EPS)
+				dir.set(0.f, 0.f, 1.f);
+			else
+				dir.normalize();
+
+			dropped_weapon->SetActivationSpeedOverride(dir.mul(7.0f));
+		}
+
+		pObj->H_SetParent(nullptr, final_dont_create_shell);
 	}
 	else
-		pObj->H_SetParent(nullptr, dont_create_shell);
+		pObj->H_SetParent(nullptr, final_dont_create_shell);
 	return true;
 }
 
-//положить вещь в слот
+//пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅ
 bool CInventory::Slot(u16 slot_id, PIItem pIItem, bool bNotActivate, bool strict_placement)
 {
 	VERIFY(pIItem);
@@ -375,7 +448,7 @@ bool CInventory::Slot(u16 slot_id, PIItem pIItem, bool bNotActivate, bool strict
 
 	m_slots[slot_id].m_pIItem = pIItem;
 
-	//удалить из рюкзака или пояса
+	//пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
 	TIItemContainer::iterator it_ruck = std::find(m_ruck.begin(), m_ruck.end(), pIItem);
 	TIItemContainer::iterator it_belt = std::find(m_belt.begin(), m_belt.end(), pIItem);
 	if (it_ruck != m_ruck.end())
@@ -430,7 +503,7 @@ bool CInventory::Belt(PIItem pIItem, bool strict_placement)
 {
 	if (!strict_placement && !CanPutInBelt(pIItem)) return false;
 
-	//вещь была в слоте
+	//пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅ
 	bool in_slot = InSlot(pIItem);
 	if (in_slot)
 	{
@@ -478,7 +551,7 @@ bool CInventory::Ruck(PIItem pIItem, bool strict_placement)
 	}
 
 	bool in_slot = InSlot(pIItem);
-	//вещь была в слоте
+	//пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅ
 	if (in_slot)
 	{
 		if (GetActiveSlot() == pIItem->CurrSlot())
@@ -488,7 +561,7 @@ bool CInventory::Ruck(PIItem pIItem, bool strict_placement)
 	}
 	else
 	{
-		//вещь была на поясе или вообще только поднята с земли
+		//пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅ
 		TIItemContainer::iterator it = std::find(m_belt.begin(), m_belt.end(), pIItem);
 		if (m_belt.end() != it)
 			m_belt.erase(it);
@@ -529,60 +602,79 @@ void CInventory::Activate_deffered	(u32 slot, u32 _frame)
 
 void CInventory::Activate(u16 slot, bool bForce)
 {
-	if (OnClient())
-		return;
+	CActor* pActor = smart_cast<CActor*>(m_pOwner);
+	const bool dedicated_single_local_actor = IsDedicatedSingleLocalInventoryActor(pActor);
 
+	WPN_TRACE("Inventory::Activate owner=%s actor=%u slot=%u force=%d active=%u next=%u on_client=%d on_server=%d dedicated_single_local=%d",
+		m_pOwner ? m_pOwner->Name() : "<null>",
+		pActor ? pActor->ID() : u16(-1),
+		slot,
+		bForce ? 1 : 0,
+		GetActiveSlot(),
+		GetNextActiveSlot(),
+		OnClient() ? 1 : 0,
+		OnServer() ? 1 : 0,
+		dedicated_single_local_actor ? 1 : 0);
+
+	if (OnClient() && !dedicated_single_local_actor)
+	{
+		WPN_TRACE("Inventory::Activate allow on client for non-local owner=%s actor=%u slot=%u",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			slot);
+	}
 	PIItem tmp_item = NULL;
 	if (slot != NO_ACTIVE_SLOT)
 		tmp_item = ItemFromSlot(slot);
 
 	if (tmp_item && IsSlotBlocked(tmp_item) && (!bForce))
 	{
-		//to restore after unblocking ...
+		WPN_TRACE("Inventory::Activate blocked: slot item is blocked owner=%s actor=%u slot=%u item=%s",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			slot,
+			tmp_item->object().cName().c_str());
 		SetPrevActiveSlot(slot);
 		return;
 	}
 
 	if (GetActiveSlot() == slot || (GetNextActiveSlot() == slot && !bForce))
 	{
-		//		if (m_iNextActiveSlot != slot) {
-		//			LPCSTR const name = smart_cast<CGameObject const*>(m_pOwner)->cName().c_str();
-		//			if ( !xr_strcmp("jup_b43_stalker_assistant_pri6695", name) )
-		//				LogStackTrace	("");
-		//			Msg				( "[%6d][%s] CInventory::Activate changing next active slot to %d", Device.dwTimeGlobal, name, slot );
-		//		}
 		m_iNextActiveSlot = slot;
-#ifdef DEBUG
-		//		Msg("--- There's no need to activate slot [%d], next active slot is [%d]", slot, m_iNextActiveSlot);
-#endif
+		WPN_TRACE("Inventory::Activate skipped: already active/next owner=%s actor=%u slot=%u active=%u next=%u",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			slot,
+			GetActiveSlot(),
+			GetNextActiveSlot());
 		return;
 	}
 
 	R_ASSERT2(slot<=LastSlot(), "wrong slot number");
 
 	if (slot != NO_ACTIVE_SLOT && !m_slots[slot].CanBeActivated())
+	{
+		WPN_TRACE("Inventory::Activate blocked: slot cannot be activated owner=%s actor=%u slot=%u",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			slot);
 		return;
+	}
 
-#ifdef DEBUG
-	//	Msg("--- Activating slot [%d], inventory owner: [%s], Frame[%d]", slot, m_pOwner->Name(), Device.dwFrame);
-#endif // #ifdef DEBUG
-
-	//активный слот не выбран
 	if (GetActiveSlot() == NO_ACTIVE_SLOT)
 	{
 		if (tmp_item)
 		{
-			//			if ( m_iNextActiveSlot != slot) {
-			//				LPCSTR const name = smart_cast<CGameObject const*>(m_pOwner)->cName().c_str();
-			//				if ( !xr_strcmp("jup_b43_stalker_assistant_pri6695", name) )
-			//					LogStackTrace	("");
-			//				Msg				( "[%6d][%s] CInventory::Activate changing next active slot2 to %d", Device.dwTimeGlobal, name, slot );
-			//			}
 			m_iNextActiveSlot = slot;
+			WPN_TRACE("Inventory::Activate set next from NO_ACTIVE owner=%s actor=%u slot=%u item=%s",
+				m_pOwner ? m_pOwner->Name() : "<null>",
+				pActor ? pActor->ID() : u16(-1),
+				slot,
+				tmp_item->object().cName().c_str());
 		}
 		else
 		{
-			if (slot == GRENADE_SLOT) //fake for grenade
+			if (slot == GRENADE_SLOT)
 			{
 				PIItem gr = SameSlot(GRENADE_SLOT, NULL, true);
 				if (gr)
@@ -590,7 +682,6 @@ void CInventory::Activate(u16 slot, bool bForce)
 			}
 		}
 	}
-		//активный слот задействован
 	else if (slot == NO_ACTIVE_SLOT || tmp_item)
 	{
 		PIItem active_item = ActiveItem();
@@ -598,37 +689,32 @@ void CInventory::Activate(u16 slot, bool bForce)
 		{
 			CHudItem* tempItem = active_item->cast_hud_item();
 			R_ASSERT2(tempItem, active_item->object().cNameSect().c_str());
-
+			WPN_TRACE("Inventory::Activate deactivating current item owner=%s actor=%u active_item=%s next_slot=%u",
+				m_pOwner ? m_pOwner->Name() : "<null>",
+				pActor ? pActor->ID() : u16(-1),
+				active_item->object().cName().c_str(),
+				slot);
 			tempItem->SendDeactivateItem();
-#ifdef DEBUG
-			//			Msg("--- Inventory owner [%s]: send deactivate item [%s]", m_pOwner->Name(), active_item->NameItem());
-#endif // #ifdef DEBUG
 		}
-		else //in case where weapon is going to destroy
+		else
 		{
 			if (tmp_item)
 				tmp_item->ActivateItem();
 
-			//!			if ( m_iActiveSlot != slot ) {
-			//!				LPCSTR const name = smart_cast<CGameObject const*>(m_pOwner)->cName().c_str();
-			//				if ( !xr_strcmp("jup_b43_stalker_assistant_pri6695", name) )
-			//					LogStackTrace	("");
-			//!				Msg				("[%6d][%s] CInventory::Activate changing active slot from %d to %d", Device.dwTimeGlobal, name, m_iActiveSlot, slot );
-			//!			}
-
 			m_iActiveSlot = slot;
+			WPN_TRACE("Inventory::Activate forced active slot set owner=%s actor=%u new_active=%u",
+				m_pOwner ? m_pOwner->Name() : "<null>",
+				pActor ? pActor->ID() : u16(-1),
+				m_iActiveSlot);
 		}
-		//		if ( m_iNextActiveSlot != slot ) {
-		//			LPCSTR const name = smart_cast<CGameObject const*>(m_pOwner)->cName().c_str();
-		//			if ( !xr_strcmp("jup_b43_stalker_assistant_pri6695", name) && !slot )
-		//				LogStackTrace	("");
-		//			Msg				( "[%6d][%s] CInventory::Activate changing next active slot3 to %d", Device.dwTimeGlobal, name, slot );
-		//		}
 		m_iNextActiveSlot = slot;
+		WPN_TRACE("Inventory::Activate set next slot owner=%s actor=%u active=%u next=%u",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			m_iActiveSlot,
+			m_iNextActiveSlot);
 	}
 }
-
-
 PIItem CInventory::ItemFromSlot(u16 slot) const
 {
 	if (slot == NO_ACTIVE_SLOT)
@@ -640,7 +726,23 @@ PIItem CInventory::ItemFromSlot(u16 slot) const
 void CInventory::SendActionEvent(u16 cmd, u32 flags)
 {
 	CActor* pActor = smart_cast<CActor*>(m_pOwner);
-	if (!pActor) return;
+	if (!pActor)
+	{
+		if (IsWeaponTraceCmd(cmd))
+			WPN_TRACE("Inventory::SendActionEvent skipped: no actor owner=%s cmd=%d", m_pOwner ? m_pOwner->Name() : "<null>", cmd);
+		return;
+	}
+
+	if (IsWeaponTraceCmd(cmd))
+	{
+		WPN_TRACE("Inventory::SendActionEvent actor=%u cmd=%d(%s) flags=0x%08x zoom_seed=%d shot_seed=%d",
+			pActor->ID(),
+			cmd,
+			InventoryTraceActionName(cmd),
+			flags,
+			pActor->GetZoomRndSeed(),
+			pActor->GetShotRndSeed());
+	}
 
 	NET_Packet P;
 	pActor->u_EventGen(P, GE_INV_ACTION, pActor->ID());
@@ -648,69 +750,157 @@ void CInventory::SendActionEvent(u16 cmd, u32 flags)
 	P.w_u32(flags);
 	P.w_s32(pActor->GetZoomRndSeed());
 	P.w_s32(pActor->GetShotRndSeed());
+
+	// Dedicated server authoritative action hint:
+	// send exact camera position/direction with actions that can result in
+	// detached world entities (drop, grenade throw, rocket launch).
+	const bool send_action_view_hint = (cmd == kDROP || cmd == kWPN_FIRE || cmd == kWPN_ZOOM);
+	if (send_action_view_hint)
+	{
+		Fvector drop_pos = pActor->Position();
+		Fvector drop_dir = pActor->Direction();
+		if (CCameraBase* active_cam = pActor->cam_Active())
+		{
+			drop_pos = active_cam->Position();
+			drop_dir = active_cam->Direction();
+		}
+
+		if (!_valid(drop_pos))
+			drop_pos = pActor->Position();
+		if (!_valid(drop_dir) || drop_dir.square_magnitude() < EPS)
+			drop_dir.set(0.f, 0.f, 1.f);
+		else
+			drop_dir.normalize();
+
+		P.w_vec3(drop_pos);
+		P.w_vec3(drop_dir);
+
+		WPN_TRACE("Inventory::SendActionEvent action hint actor=%u cmd=%d(%s) pos=(%.3f,%.3f,%.3f) dir=(%.3f,%.3f,%.3f)",
+			pActor->ID(),
+			cmd,
+			InventoryTraceActionName(cmd),
+			drop_pos.x, drop_pos.y, drop_pos.z,
+			drop_dir.x, drop_dir.y, drop_dir.z);
+	}
 	pActor->u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
 };
-
 bool CInventory::Action(u16 cmd, u32 flags)
 {
 	CActor* pActor = smart_cast<CActor*>(m_pOwner);
+	const bool trace = IsWeaponTraceCmd(cmd);
+	const bool dedicated_single_local_actor = IsDedicatedSingleLocalInventoryActor(pActor);
+
+	if (trace)
+	{
+		WPN_TRACE("Inventory::Action owner=%s actor=%u cmd=%d(%s) flags=0x%08x active_slot=%u next_slot=%u on_client=%d on_server=%d",
+			m_pOwner ? m_pOwner->Name() : "<null>",
+			pActor ? pActor->ID() : u16(-1),
+			cmd,
+			InventoryTraceActionName(cmd),
+			flags,
+			GetActiveSlot(),
+			GetNextActiveSlot(),
+			OnClient() ? 1 : 0,
+			OnServer() ? 1 : 0);
+	}
 
 	if (pActor)
 	{
 		switch (cmd)
 		{
 		case kWPN_FIRE:
-			{
-				pActor->SetShotRndSeed();
-			}
+			pActor->SetShotRndSeed();
+			if (trace)
+				WPN_TRACE("Inventory::Action set shot seed actor=%u seed=%d", pActor->ID(), pActor->GetShotRndSeed());
 			break;
 		case kWPN_ZOOM:
-			{
-				pActor->SetZoomRndSeed();
-			}
+			pActor->SetZoomRndSeed();
+			if (trace)
+				WPN_TRACE("Inventory::Action set zoom seed actor=%u seed=%d", pActor->ID(), pActor->GetZoomRndSeed());
 			break;
-		};
-	};
+		}
+	}
 
 	if (g_pGameLevel && OnClient() && pActor)
 	{
 		switch (cmd)
 		{
-		case kUSE: break;
-
-		case kDROP:
-			{
-				if (flags & CMD_STOP)
-				{
-					PIItem tmp_item = ActiveItem();
-					if (tmp_item)
-						tmp_item->DenyTrade();
-				}
-				SendActionEvent(cmd, flags);
-				return true;
-			}
+		case kUSE:
 			break;
-
-		case kWPN_NEXT:
-		case kWPN_RELOAD:
-		case kWPN_FIRE:
-		case kWPN_FUNC:
-		case kWPN_FIREMODE_NEXT:
-		case kWPN_FIREMODE_PREV:
-		case kWPN_ZOOM:
-		case kTORCH:
-		case kNIGHT_VISION:
+		case kDROP:
+			if (flags & CMD_STOP)
 			{
+				PIItem tmp_item = ActiveItem();
+				if (tmp_item)
+					tmp_item->DenyTrade();
+			}
+			if (trace)
+				WPN_TRACE("Inventory::Action sending GE_INV_ACTION for DROP actor=%u flags=0x%08x", pActor->ID(), flags);
+			SendActionEvent(cmd, flags);
+			return true;
+
+		case kWPN_FIRE:
+		{
+			bool suppress_fire_event = false;
+			if (dedicated_single_local_actor && (flags & CMD_START) && ActiveItem())
+			{
+				if (CWeapon* active_weapon = smart_cast<CWeapon*>(&ActiveItem()->object()))
+				{
+					suppress_fire_event =
+						active_weapon->IsPending() ||
+						active_weapon->GetState() == CWeapon::eReload ||
+						active_weapon->GetNextState() == CWeapon::eReload;
+				}
+			}
+
+			if (suppress_fire_event)
+			{
+				if (trace)
+					WPN_TRACE("Inventory::Action suppress GE_INV_ACTION fire actor=%u cmd=%d flags=0x%08x reason=weapon_reload_or_pending item=%s",
+						pActor->ID(),
+						cmd,
+						flags,
+						ActiveItem() ? ActiveItem()->object().cName().c_str() : "<none>");
+			}
+			else
+			{
+				if (trace)
+					WPN_TRACE("Inventory::Action sending GE_INV_ACTION actor=%u cmd=%d flags=0x%08x local_dedicated_single=%d",
+						pActor->ID(), cmd, flags, dedicated_single_local_actor ? 1 : 0);
 				SendActionEvent(cmd, flags);
 			}
 			break;
 		}
+		case kWPN_NEXT:
+		case kWPN_RELOAD:
+		case kWPN_FUNC:
+		case kWPN_FIREMODE_NEXT:
+		case kWPN_FIREMODE_PREV:
+		case kWPN_ZOOM:
+			if (trace)
+				WPN_TRACE("Inventory::Action sending GE_INV_ACTION actor=%u cmd=%d flags=0x%08x local_dedicated_single=%d",
+					pActor->ID(), cmd, flags, dedicated_single_local_actor ? 1 : 0);
+			SendActionEvent(cmd, flags);
+			break;
+		case kTORCH:
+		case kNIGHT_VISION:
+			if (trace)
+				WPN_TRACE("Inventory::Action sending GE_INV_ACTION actor=%u cmd=%d flags=0x%08x", pActor->ID(), cmd, flags);
+			SendActionEvent(cmd, flags);
+			break;
+		}
 	}
 
-
-	if (ActiveItem() &&
-		ActiveItem()->Action(cmd, flags))
+	if (ActiveItem() && ActiveItem()->Action(cmd, flags))
+	{
+		if (trace)
+			WPN_TRACE("Inventory::Action consumed by ActiveItem owner=%s cmd=%d item=%s",
+				m_pOwner ? m_pOwner->Name() : "<null>",
+				cmd,
+				ActiveItem()->object().cName().c_str());
 		return true;
+	}
+
 	bool b_send_event = false;
 	switch (cmd)
 	{
@@ -722,11 +912,18 @@ bool CInventory::Action(u16 cmd, u32 flags)
 	case kWPN_6:
 	{
 		b_send_event = true;
-		if (cmd == kWPN_6) return false;
+		if (cmd == kWPN_6)
+		{
+			if (trace)
+				WPN_TRACE("Inventory::Action slot command ignored for kWPN_6 owner=%s", m_pOwner ? m_pOwner->Name() : "<null>");
+			return false;
+		}
 
 		u16 slot = u16(cmd - kWPN_1 + 1);
 		if (flags & CMD_START)
 		{
+			if (trace)
+				WPN_TRACE("Inventory::Action ActiveWeapon slot=%u owner=%s", slot, m_pOwner ? m_pOwner->Name() : "<null>");
 			ActiveWeapon(slot);
 		}
 	}
@@ -740,6 +937,9 @@ bool CInventory::Action(u16 cmd, u32 flags)
 				Activate(NO_ACTIVE_SLOT);
 			else
 				Activate(ARTEFACT_SLOT);
+			if (trace)
+				WPN_TRACE("Inventory::Action artefact toggle owner=%s active=%u next=%u",
+					m_pOwner ? m_pOwner->Name() : "<null>", GetActiveSlot(), GetNextActiveSlot());
 		}
 	}
 	break;
@@ -748,27 +948,34 @@ bool CInventory::Action(u16 cmd, u32 flags)
 		b_send_event = true;
 		if (flags & CMD_START)
 		{
-			if (!psActorFlags.test(AF_3D_PDA)) return false;
+			if (!psActorFlags.test(AF_3D_PDA))
+			{
+				if (trace)
+					WPN_TRACE("Inventory::Action blocked ACTIVE_JOBS: AF_3D_PDA is disabled owner=%s", m_pOwner ? m_pOwner->Name() : "<null>");
+				return false;
+			}
 
 			if (smart_cast<CPda*>(ActiveItem()))
-			{
 				Activate(NO_ACTIVE_SLOT);
-			}
 			else
-			{
 				Activate(PDA_SLOT);
-			}
 		}
 	}
 	break;
 	}
 
 	if (b_send_event && g_pGameLevel && OnClient() && pActor)
+	{
+		if (trace)
+			WPN_TRACE("Inventory::Action sending deferred GE_INV_ACTION actor=%u cmd=%d flags=0x%08x local_dedicated_single=%d",
+				pActor->ID(), cmd, flags, dedicated_single_local_actor ? 1 : 0);
 		SendActionEvent(cmd, flags);
+	}
 
+	if (trace)
+		WPN_TRACE("Inventory::Action completed without consume owner=%s cmd=%d", m_pOwner ? m_pOwner->Name() : "<null>", cmd);
 	return false;
 }
-
 void CInventory::ActiveWeapon(u16 slot)
 {
 	// weapon is in active slot
@@ -783,50 +990,93 @@ void CInventory::ActiveWeapon(u16 slot)
 
 void CInventory::Update()
 {
-	if (OnServer())
+	CActor* pActor = smart_cast<CActor*>(m_pOwner);
+	const bool dedicated_single_local_actor = IsDedicatedSingleLocalInventoryActor(pActor);
+
+	if (OnServer() || dedicated_single_local_actor)
 	{
 		if (m_iActiveSlot != m_iNextActiveSlot)
 		{
-			CObject* pActor_owner = smart_cast<CObject*>(m_pOwner);
-			if (Level().CurrentViewEntity() == pActor_owner)
+			WPN_TRACE("Inventory::Update slot transition owner=%s actor=%u active=%u next=%u dedicated=%d on_server=%d dedicated_single_local=%d",
+				m_pOwner ? m_pOwner->Name() : "<null>",
+				pActor ? pActor->ID() : u16(-1),
+				m_iActiveSlot, m_iNextActiveSlot, g_dedicated_server ? 1 : 0, OnServer() ? 1 : 0, dedicated_single_local_actor ? 1 : 0);
+			if (g_dedicated_server)
 			{
-				if ((m_iNextActiveSlot != NO_ACTIVE_SLOT) &&
-					ItemFromSlot(m_iNextActiveSlot) &&
-					!g_player_hud->allow_activation(ItemFromSlot(m_iNextActiveSlot)->cast_hud_item())
-				)
-					return;
-			}
-			if (ActiveItem())
-			{
-				CHudItem* hi = ActiveItem()->cast_hud_item();
-
-				if (!hi->IsHidden())
+				if (ActiveItem())
 				{
-					if (hi->GetState() == CHUDState::eIdle && hi->GetNextState() == CHUDState::eIdle)
-						hi->SendDeactivateItem();
+					WPN_TRACE("Inventory::Update dedicated force-hide item owner=%s item=%s", m_pOwner ? m_pOwner->Name() : "<null>", ActiveItem()->object().cName().c_str());
+					ActiveItem()->cast_hud_item()->SetState(CHUDState::eHidden);
+					ActiveItem()->cast_hud_item()->SetNextState(CHUDState::eHidden);
+				}
+			}
+			else
+			{
+				if (ActiveItem())
+				{
+					CHudItem* hi = ActiveItem()->cast_hud_item();
+					if (!hi->IsHidden())
+					{
+						WPN_TRACE("Inventory::Update waiting for hide complete owner=%s actor=%u active=%u next=%u state=%u next_state=%u",
+							m_pOwner ? m_pOwner->Name() : "<null>",
+							pActor ? pActor->ID() : u16(-1),
+							m_iActiveSlot,
+							m_iNextActiveSlot,
+							hi->GetState(),
+							hi->GetNextState());
+						if (dedicated_single_local_actor &&
+							m_iNextActiveSlot == NO_ACTIVE_SLOT &&
+							(hi->GetState() == CHUDState::eShowing || hi->GetNextState() == CHUDState::eShowing))
+						{
+							WPN_TRACE("Inventory::Update force hide retry owner=%s actor=%u active=%u next=%u state=%u next_state=%u",
+								m_pOwner ? m_pOwner->Name() : "<null>",
+								pActor ? pActor->ID() : u16(-1),
+								m_iActiveSlot,
+								m_iNextActiveSlot,
+								hi->GetState(),
+								hi->GetNextState());
+							hi->SendDeactivateItem();
+							UpdateDropTasks();
+							return;
+						}
 
-					UpdateDropTasks();
-					return;
+						if (hi->GetState() == CHUDState::eIdle && hi->GetNextState() == CHUDState::eIdle)
+							hi->SendDeactivateItem();
+
+						UpdateDropTasks();
+						return;
+					}
 				}
 			}
 
 			if (m_change_after_deactivate)
 				ActivateNextGrenage();
 
-			if (GetNextActiveSlot() != NO_ACTIVE_SLOT)
+						if (GetNextActiveSlot() != NO_ACTIVE_SLOT)
 			{
 				PIItem tmp_next_active = ItemFromSlot(GetNextActiveSlot());
 				if (tmp_next_active)
 				{
 					if (IsSlotBlocked(tmp_next_active))
 					{
+						WPN_TRACE("Inventory::Update next slot blocked owner=%s active=%u next=%u item=%s",
+							m_pOwner ? m_pOwner->Name() : "<null>", m_iActiveSlot, GetNextActiveSlot(),
+							tmp_next_active->object().cName().c_str());
 						Activate(m_iActiveSlot);
 						return;
 					}
 					else
 					{
+						WPN_TRACE("Inventory::Update activating next slot owner=%s active=%u next=%u item=%s",
+							m_pOwner ? m_pOwner->Name() : "<null>", m_iActiveSlot, GetNextActiveSlot(),
+							tmp_next_active->object().cName().c_str());
 						tmp_next_active->ActivateItem();
 					}
+				}
+				else
+				{
+					WPN_TRACE("Inventory::Update next slot item missing owner=%s active=%u next=%u",
+						m_pOwner ? m_pOwner->Name() : "<null>", m_iActiveSlot, GetNextActiveSlot());
 				}
 			}
 
@@ -835,6 +1085,8 @@ void CInventory::Update()
 			auto prev_obj = ActiveItem() ? ActiveItem()->object().lua_game_object() : NULL;
 			auto prev_slot = m_iActiveSlot;
 			m_iActiveSlot = GetNextActiveSlot();
+			WPN_TRACE("Inventory::Update committed slot switch owner=%s active=%u next=%u",
+				m_pOwner ? m_pOwner->Name() : "<null>", m_iActiveSlot, m_iNextActiveSlot);
 			auto obj = ActiveItem() ? ActiveItem()->object().lua_game_object() : NULL;
 			if (CActor_OnChangedSlot)
 			{
@@ -842,14 +1094,34 @@ void CInventory::Update()
 			}
 		}
 		else if ((GetNextActiveSlot() != NO_ACTIVE_SLOT) && ActiveItem() && ActiveItem()->cast_hud_item()->IsHidden())
+			{
+				if (dedicated_single_local_actor)
+				{
+					WPN_TRACE("Inventory::Update skip hidden auto-reactivate for local dedicated-single owner=%s actor=%u active=%u next=%u item=%s",
+						m_pOwner ? m_pOwner->Name() : "<null>",
+						pActor ? pActor->ID() : u16(-1),
+						m_iActiveSlot,
+						m_iNextActiveSlot,
+						ActiveItem()->object().cName().c_str());
+				}
+				else
+				{
+					WPN_TRACE("Inventory::Update hidden auto-reactivate owner=%s actor=%u active=%u next=%u item=%s",
+						m_pOwner ? m_pOwner->Name() : "<null>",
+						pActor ? pActor->ID() : u16(-1),
+						m_iActiveSlot,
+						m_iNextActiveSlot,
+						ActiveItem()->object().cName().c_str());
 					ActiveItem()->ActivateItem();
+				}
+			}
 	}
 	UpdateDropTasks();
 }
 
 void CInventory::UpdateDropTasks()
 {
-	//проверить слоты
+	//пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
 	for (u16 i = FirstSlot(); i <= LastSlot(); ++i)
 	{
 		PIItem itm = ItemFromSlot(i);
@@ -885,15 +1157,24 @@ void CInventory::UpdateDropItem(PIItem pIItem)
 
 		if (OnServer())
 		{
+			CObject* parent = pIItem->object().H_Parent();
+			if (!parent)
+			{
+				WPN_TRACE("Inventory::UpdateDropItem skip GE_OWNERSHIP_REJECT: no parent owner=%s item=%s",
+					m_pOwner ? m_pOwner->Name() : "<null>",
+					pIItem->object().cName().c_str());
+				return;
+			}
+
 			NET_Packet P;
-			pIItem->object().u_EventGen(P, GE_OWNERSHIP_REJECT, pIItem->object().H_Parent()->ID());
+			pIItem->object().u_EventGen(P, GE_OWNERSHIP_REJECT, parent->ID());
 			P.w_u16(u16(pIItem->object().ID()));
 			pIItem->object().u_EventSend(P);
 		}
 	} // dropManual
 }
 
-//ищем на поясе гранату такоже типа
+//пїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
 PIItem CInventory::Same(const PIItem pIItem, bool bSearchRuck) const
 {
 	const TIItemContainer& list = bSearchRuck ? m_ruck : m_belt;
@@ -910,7 +1191,7 @@ PIItem CInventory::Same(const PIItem pIItem, bool bSearchRuck) const
 	return NULL;
 }
 
-//ищем на поясе вещь для слота 
+//пїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ 
 
 PIItem CInventory::SameSlot(const u16 slot, PIItem pIItem, bool bSearchRuck) const
 {
@@ -927,7 +1208,7 @@ PIItem CInventory::SameSlot(const u16 slot, PIItem pIItem, bool bSearchRuck) con
 	return NULL;
 }
 
-//найти в инвенторе вещь с указанным именем
+//пїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ
 PIItem CInventory::Get(LPCSTR name, bool bSearchRuck) const
 {
 	const TIItemContainer& list = bSearchRuck ? m_ruck : m_belt;
@@ -1062,14 +1343,14 @@ CInventoryItem* CInventory::get_object_by_id(ALife::_OBJECT_ID tObjectID)
 	return (0);
 }
 
-//скушать предмет 
+//пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ 
 #include "game_object_space.h"
 #include "script_callback_ex.h"
 #include "script_game_object.h"
 
 bool CInventory::Eat(PIItem pIItem)
 {
-	//устанаовить съедобна ли вещь
+	//пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅ
 	CEatableItem* pItemToEat = smart_cast<CEatableItem*>(pIItem);
 	if (!pItemToEat) return false;
 
@@ -1093,7 +1374,7 @@ bool CInventory::Eat(PIItem pIItem)
 
 	if (Actor()->m_inventory == this)
 	{
-		Actor()->callback(GameObject::eUseObject)((smart_cast<CGameObject*>(pIItem))->lua_game_object());
+		Actor()->callback(GameObject::eUseObject)(pIItem->object().lua_game_object());
 
 		if (pItemToEat->IsUsingCondition() && pItemToEat->GetRemainingUses() < 1 && pItemToEat->CanDelete())
 			CurrentGameUI()->GetActorMenu().RefreshCurrentItemCell();
@@ -1185,8 +1466,8 @@ bool CInventory::CanPutInSlot(PIItem pIItem, u16 slot_id) const
 	return false;
 }
 
-//проверяет можем ли поместить вещь на пояс,
-//при этом реально ничего не меняется
+//пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅ,
+//пїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
 bool CInventory::CanPutInBelt(PIItem pIItem)
 {
 	if (InBelt(pIItem)) return false;
@@ -1199,8 +1480,8 @@ bool CInventory::CanPutInBelt(PIItem pIItem)
 	//return FreeRoom_inBelt(m_belt, pIItem, BeltWidth(), 1);
 }
 
-//проверяет можем ли поместить вещь в рюкзак,
-//при этом реально ничего не меняется
+//пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅ,
+//пїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
 bool CInventory::CanPutInRuck(PIItem pIItem) const
 {
 	if (InRuck(pIItem)) return false;
@@ -1272,7 +1553,7 @@ bool CInventory::CanTakeItem(CInventoryItem* inventory_item) const
 	VERIFY3(it == m_all.end(), "item already exists in inventory", *inventory_item->object().cName());
 
 	CActor* pActor = smart_cast<CActor*>(m_pOwner);
-	//актер всегда может взять вещь
+	//пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
 	if (!pActor && (TotalWeight() + inventory_item->Weight() > m_pOwner->MaxCarryWeight()))
 		return false;
 

@@ -14,6 +14,13 @@ CUIDialogWnd::CUIDialogWnd()
 
 CUIDialogWnd::~CUIDialogWnd()
 {
+	// Defensive cleanup: dialog can be destroyed while still registered in holder lists.
+	// Detach it to avoid dangling pointers used on next UI frame/update.
+	if (m_pParentHolder)
+	{
+		m_pParentHolder->RemoveDialogToRender(this);
+		m_pParentHolder = NULL;
+	}
 }
 
 void CUIDialogWnd::Show(bool status)

@@ -61,19 +61,18 @@ void xrServer::Process_event_ownership(NET_Packet& P, ClientID sender, u32 time,
 	xrClientData* c_entity = e_entity->owner;
 	xrClientData* c_from = ID_to_client(sender);
 
-	if ((GetServerClient() != c_from) && (c_parent != c_from))
+	if (game->Type() == eGameIDSingle && (GetServerClient() != c_from) && (c_parent != c_from))
 	{
 		// trust only ServerClient or new_ownerClient
 		return;
 	}
 
 	CSE_ALifeCreatureAbstract* alife_entity = smart_cast<CSE_ALifeCreatureAbstract*>(e_parent);
-	if (alife_entity && !alife_entity->g_Alive())
+	if (game->Type() != eGameIDSingle && alife_entity && !alife_entity->g_Alive())
 	{
 		Msg("--- SV: WARNING: dead player [%d] tries to take item [%d]", id_parent, id_entity);
 		return;
 	}
-
 	// Game allows ownership of entity
 	if (game->OnTouch(id_parent, id_entity, bForced))
 	{

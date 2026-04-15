@@ -37,6 +37,7 @@
 #include "../Layers/xrRender/xrRender_console.h"
 #include "pch_script.h"
 #include "script_game_object.h"
+#include "weapon_trace.h"
 
 #define WEAPON_REMOVE_TIME		60000
 #define ROTATION_TIME			0.25f
@@ -47,6 +48,56 @@ CUIXml* pWpnScopeXml = NULL;
 
 //////////
 extern float scope_radius;
+
+namespace
+{
+	bool IsDedicatedSingleLocalActor(const CActor* actor)
+	{
+		if (!g_pGameLevel || !actor || g_dedicated_server || !OnClient())
+			return false;
+
+		game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+		const bool local_player_id_match =
+			game_cl && game_cl->local_player && game_cl->local_player->GameID == actor->ID();
+
+		return local_player_id_match || Level().CurrentControlEntity() == actor || Level().CurrentEntity() == actor;
+	}
+
+bool IsDedicatedSingleLocalWeapon(CWeapon* weapon)
+{
+	if (!weapon)
+		return false;
+
+	const CActor* actor = smart_cast<CActor*>(weapon->H_Parent());
+	return IsDedicatedSingleLocalActor(actor);
+}
+
+bool IsWeaponActionTraceCmd(u16 cmd)
+{
+	switch (cmd)
+	{
+	case kWPN_FIRE:
+	case kWPN_RELOAD:
+	case kWPN_ZOOM:
+	case kWPN_ZOOM_INC:
+	case kWPN_ZOOM_DEC:
+	case kWPN_NEXT:
+	case kWPN_FUNC:
+	case kWPN_FIREMODE_NEXT:
+	case kWPN_FIREMODE_PREV:
+	case kSAFEMODE:
+	case kCUSTOM16:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool IsNewAmmoSyncSeq(u16 seq, u16 last_seq)
+{
+	return s16(seq - last_seq) > 0;
+}
+}
 
 Flags32 zoomFlags = {};
 extern float n_zoom_step_count;
@@ -113,6 +164,12 @@ CWeapon::CWeapon()
 	iAmmoElapsed = -1;
 	iMagazineSize = -1;
 	m_ammoType = 0;
+	m_local_ammo_sync_seq = 0;
+	m_last_received_local_ammo_sync_seq = 0;
+	m_last_sent_local_ammo_elapsed = -1;
+	m_last_sent_local_ammo_type = undefined_ammo_type;
+	m_last_local_ammo_sync_send_time = 0;
+	m_awaiting_local_ammo_sync_after_reload = false;
 
 	eHandDependence = hdNone;
 	m_APk = 1.0f;
@@ -989,6 +1046,12 @@ BOOL CWeapon::net_Spawn(CSE_Abstract* DC)
 	if (m_ammoType >= m_ammoTypes.size())
 		m_ammoType = 0;
 	m_DefaultCartridge.Load(m_ammoTypes[m_ammoType].c_str(), m_ammoType, m_APk);
+	m_local_ammo_sync_seq = 0;
+	m_last_received_local_ammo_sync_seq = 0;
+	m_last_sent_local_ammo_elapsed = -1;
+	m_last_sent_local_ammo_type = undefined_ammo_type;
+	m_last_local_ammo_sync_send_time = 0;
+	m_awaiting_local_ammo_sync_after_reload = false;
 	if (iAmmoElapsed)
 	{
 		m_fCurrentCartirdgeDisp = m_DefaultCartridge.param_s.kDisp;
@@ -1044,6 +1107,7 @@ void CWeapon::net_Export(NET_Packet& P)
 void CWeapon::net_Import(NET_Packet& P)
 {
 	inherited::net_Import(P);
+	const bool dedicated_single_local_weapon = IsDedicatedSingleLocalWeapon(this);
 
 	float _cond;
 	P.r_float_q8(_cond, 0.0f, 1.0f);
@@ -1088,8 +1152,25 @@ void CWeapon::net_Import(NET_Packet& P)
 				Msg("!! Weapon [%d], State - [%d]", ID(), wstate);
 			else
 			{
-				m_ammoType = ammoType;
-				SetAmmoElapsed((ammo_elapsed));
+				if (dedicated_single_local_weapon)
+				{
+					if (m_ammoType != ammoType || iAmmoElapsed != int(ammo_elapsed))
+					{
+						WPN_TRACE(
+							"Weapon::net_Import skip ammo sync for local dedicated-single weapon=%s state=%u incoming_ammo=%u current_ammo=%d incoming_type=%u current_type=%u",
+							cName().c_str(),
+							wstate,
+							ammo_elapsed,
+							iAmmoElapsed,
+							ammoType,
+							m_ammoType);
+					}
+				}
+				else
+				{
+					m_ammoType = ammoType;
+					SetAmmoElapsed((ammo_elapsed));
+				}
 			}
 		}
 		break;
@@ -1140,23 +1221,83 @@ void CWeapon::OnEvent(NET_Packet& P, u16 type)
 		break;
 
 	case GE_WPN_STATE_CHANGE:
+	{
+		u8 state = 0;
+		u8 net_sub_state = 0;
+		u8 net_ammo_type = 0;
+		u8 AmmoElapsed = 0;
+		u8 NextAmmo = 0;
+		P.r_u8(state);
+		P.r_u8(net_sub_state);
+		P.r_u8(net_ammo_type);
+		AmmoElapsed = P.r_u8();
+		NextAmmo = P.r_u8();
+		const bool dedicated_single_local_weapon = IsDedicatedSingleLocalWeapon(this);
+		WPN_TRACE("Weapon::OnEvent GE_WPN_STATE_CHANGE weapon=%s state=%u old_state=%u sub_state=%u ammo_elapsed=%u next_ammo=%u local=%d remote=%d on_client=%d on_server=%d",
+			cName().c_str(), state, GetState(), net_sub_state, AmmoElapsed, NextAmmo,
+			Local() ? 1 : 0, Remote() ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0);
+		if (dedicated_single_local_weapon)
 		{
-			u8 state;
-			P.r_u8(state);
-			P.r_u8(m_sub_state);
-			//			u8 NewAmmoType =
-			P.r_u8();
-			u8 AmmoElapsed = P.r_u8();
-			u8 NextAmmo = P.r_u8();
-			if (NextAmmo == undefined_ammo_type)
-				m_set_next_ammoType_on_reload = undefined_ammo_type;
-			else
-				m_set_next_ammoType_on_reload = NextAmmo;
-
-			if (OnClient()) SetAmmoElapsed(int(AmmoElapsed));
-			OnStateSwitch(u32(state), GetState());
+			WPN_TRACE("Weapon::OnEvent GE_WPN_STATE_CHANGE ignored local dedicated-single weapon=%s state=%u", cName().c_str(), state);
+			break;
 		}
-		break;
+		m_sub_state = net_sub_state;
+		if (NextAmmo == undefined_ammo_type)
+			m_set_next_ammoType_on_reload = undefined_ammo_type;
+		else
+			m_set_next_ammoType_on_reload = NextAmmo;
+		if (OnClient())
+			SetAmmoElapsed(int(AmmoElapsed));
+
+		OnStateSwitch(u32(state), GetState());
+	}
+	break;
+	case GE_WPN_AMMO_SYNC:
+	{
+		u16 sync_seq = P.r_u16();
+		u16 sync_ammo_elapsed = P.r_u16();
+		u8 sync_ammo_type = P.r_u8();
+		WPN_TRACE("Weapon::OnEvent GE_WPN_AMMO_SYNC weapon=%s seq=%u ammo=%u type=%u current_ammo=%d current_type=%u local=%d remote=%d on_client=%d on_server=%d",
+			cName().c_str(),
+			sync_seq,
+			sync_ammo_elapsed,
+			sync_ammo_type,
+			iAmmoElapsed,
+			m_ammoType,
+			Local() ? 1 : 0,
+			Remote() ? 1 : 0,
+			OnClient() ? 1 : 0,
+			OnServer() ? 1 : 0);
+
+		if (!OnServer())
+		{
+			WPN_TRACE("Weapon::OnEvent GE_WPN_AMMO_SYNC ignored on non-server weapon=%s", cName().c_str());
+			break;
+		}
+
+		if (!IsNewAmmoSyncSeq(sync_seq, m_last_received_local_ammo_sync_seq))
+		{
+			WPN_TRACE("Weapon::OnEvent GE_WPN_AMMO_SYNC stale seq ignored weapon=%s seq=%u last=%u",
+				cName().c_str(), sync_seq, m_last_received_local_ammo_sync_seq);
+			break;
+		}
+
+		m_last_received_local_ammo_sync_seq = sync_seq;
+		if (sync_ammo_type < m_ammoTypes.size())
+			m_ammoType = sync_ammo_type;
+		else
+			WPN_TRACE("Weapon::OnEvent GE_WPN_AMMO_SYNC invalid ammo_type weapon=%s type=%u max=%u",
+				cName().c_str(), sync_ammo_type, m_ammoTypes.size() ? u8(m_ammoTypes.size() - 1) : 0);
+
+		SetAmmoElapsed(int(sync_ammo_elapsed));
+		if (m_awaiting_local_ammo_sync_after_reload)
+		{
+			WPN_TRACE("Weapon::OnEvent GE_WPN_AMMO_SYNC clear deferred-reload fire gate weapon=%s ammo=%d type=%u",
+				cName().c_str(), iAmmoElapsed, m_ammoType);
+			m_awaiting_local_ammo_sync_after_reload = false;
+		}
+	}
+	break;
 	default:
 		{
 			inherited::OnEvent(P, type);
@@ -1220,6 +1361,38 @@ void CWeapon::OnActiveItem()
 	//. from Activate
 	UpdateAddonsVisibility();
 	m_BriefInfo_CalcFrame = 0;
+	CActor* actor_owner = smart_cast<CActor*>(H_Parent());
+	u16 active_slot = u16(-1);
+	u16 next_slot = u16(-1);
+	if (actor_owner)
+	{
+		active_slot = actor_owner->inventory().GetActiveSlot();
+		next_slot = actor_owner->inventory().GetNextActiveSlot();
+	}
+	const bool dedicated_single_local_weapon = IsDedicatedSingleLocalWeapon(this);
+	WPN_TRACE("Weapon::OnActiveItem weapon=%s actor=%u curr_slot=%u active=%u next=%u state=%u next_state=%u pending=%d local=%d on_client=%d on_server=%d",
+		cName().c_str(),
+		actor_owner ? actor_owner->ID() : u16(-1),
+		CurrSlot(),
+		active_slot,
+		next_slot,
+		GetState(),
+		GetNextState(),
+		IsPending() ? 1 : 0,
+		Local() ? 1 : 0,
+		OnClient() ? 1 : 0,
+		OnServer() ? 1 : 0);
+	if (dedicated_single_local_weapon && actor_owner && next_slot == NO_ACTIVE_SLOT)
+	{
+		WPN_TRACE("Weapon::OnActiveItem blocked local show due holster request weapon=%s actor=%u active=%u next=%u state=%u next_state=%u",
+			cName().c_str(),
+			actor_owner->ID(),
+			active_slot,
+			next_slot,
+			GetState(),
+			GetNextState());
+		return;
+	}
 
 	//. Show
 	SwitchState(eShowing);
@@ -1245,16 +1418,34 @@ void CWeapon::SendHiddenItem()
 {
 	if (!CHudItem::object().getDestroy() && m_pInventory)
 	{
-		// !!! Just single entry for given state !!!
-		NET_Packet P;
-		CHudItem::object().u_EventGen(P, GE_WPN_STATE_CHANGE, CHudItem::object().ID());
-		P.w_u8(u8(eHiding));
-		P.w_u8(u8(m_sub_state));
-		P.w_u8(m_ammoType);
-		P.w_u8(u8(iAmmoElapsed & 0xff));
-		P.w_u8(m_set_next_ammoType_on_reload);
-		CHudItem::object().u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
-		SetPending(TRUE);
+		WPN_TRACE("Weapon::SendHiddenItem weapon=%s state=%u next=%u ammo=%d sub_state=%u local=%d on_client=%d on_server=%d",
+			cName().c_str(), GetState(), GetNextState(), iAmmoElapsed, m_sub_state,
+			Local() ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0);
+		if (OnServer())
+		{
+			NET_Packet P;
+			CHudItem::object().u_EventGen(P, GE_WPN_STATE_CHANGE, CHudItem::object().ID());
+			P.w_u8(u8(eHiding));
+			P.w_u8(u8(m_sub_state));
+			P.w_u8(m_ammoType);
+			P.w_u8(u8(iAmmoElapsed & 0xff));
+			P.w_u8(m_set_next_ammoType_on_reload);
+			CHudItem::object().u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
+		}
+		else
+		{
+			WPN_TRACE("Weapon::SendHiddenItem skip GE_WPN_STATE_CHANGE on client weapon=%s", cName().c_str());
+		}
+		if (IsDedicatedSingleLocalWeapon(this))
+		{
+			WPN_TRACE("Weapon::SendHiddenItem local dedicated-single immediate SwitchState(eHiding) weapon=%s", cName().c_str());
+			SwitchState(eHiding);
+		}
+		else
+		{
+			SetPending(TRUE);
+			WPN_TRACE("Weapon::SendHiddenItem set pending after network event weapon=%s", cName().c_str());
+		}
 	}
 }
 
@@ -1302,6 +1493,8 @@ void CWeapon::UpdateCL()
 	if (OnClient()) // werasik2aa not sure
 		make_Interpolation();
 
+	SyncLocalAmmoToServerIfNeeded();
+
 	if (GetNextState() == GetState() && !g_dedicated_server)
 	{
 		CActor* pActor = smart_cast<CActor*>(H_Parent());
@@ -1346,6 +1539,48 @@ void CWeapon::UpdateCL()
 		m_zoom_params.m_pVision->Update();
 }
 
+void CWeapon::SyncLocalAmmoToServerIfNeeded()
+{
+	if (!g_pGameLevel || !OnClient() || OnServer())
+		return;
+
+	if (!IsDedicatedSingleLocalWeapon(this))
+		return;
+
+	if (!H_Parent())
+		return;
+
+	const u32 now = Device.dwTimeGlobal;
+	const bool periodic_resync = (m_last_local_ammo_sync_send_time == 0) ||
+		(now - m_last_local_ammo_sync_send_time >= 1000);
+	if (!periodic_resync &&
+		m_last_sent_local_ammo_elapsed == iAmmoElapsed &&
+		m_last_sent_local_ammo_type == m_ammoType)
+		return;
+
+	++m_local_ammo_sync_seq;
+	const u16 ammo_elapsed = iAmmoElapsed <= 0 ? 0 : (iAmmoElapsed >= int(u16(-1)) ? u16(-1) : u16(iAmmoElapsed));
+
+	NET_Packet P;
+	CHudItem::object().u_EventGen(P, GE_WPN_AMMO_SYNC, CHudItem::object().ID());
+	P.w_u16(m_local_ammo_sync_seq);
+	P.w_u16(ammo_elapsed);
+	P.w_u8(m_ammoType);
+	CHudItem::object().u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
+
+	WPN_TRACE("Weapon::SyncLocalAmmoToServerIfNeeded weapon=%s seq=%u ammo=%u type=%u prev_ammo=%d prev_type=%u",
+		cName().c_str(),
+		m_local_ammo_sync_seq,
+		ammo_elapsed,
+		m_ammoType,
+		m_last_sent_local_ammo_elapsed,
+		m_last_sent_local_ammo_type);
+
+	m_last_sent_local_ammo_elapsed = iAmmoElapsed;
+	m_last_sent_local_ammo_type = m_ammoType;
+	m_last_local_ammo_sync_send_time = now;
+}
+
 void CWeapon::EnableActorNVisnAfterZoom()
 {
 	CActor* pA = smart_cast<CActor*>(H_Parent());
@@ -1387,6 +1622,8 @@ void CWeapon::signal_HideComplete()
 void CWeapon::SetDefaults()
 {
 	SetPending(FALSE);
+	m_awaiting_local_ammo_sync_after_reload = false;
+	m_last_local_ammo_sync_send_time = 0;
 
 	m_flags.set(FUsingCondition, TRUE);
 	bMisfire = false;
@@ -1403,46 +1640,92 @@ void CWeapon::UpdatePosition(const Fmatrix& trans)
 
 bool CWeapon::Action(u16 cmd, u32 flags)
 {
-	if (inherited::Action(cmd, flags)) return true;
+	const bool trace = IsWeaponActionTraceCmd(cmd);
+	if (trace)
+	{
+		WPN_TRACE("Weapon::Action weapon=%s cmd=%u(%s) flags=0x%08x state=%u next=%u pending=%d zoomed=%d ammo=%d",
+			cName().c_str(), cmd, id_to_action_name((EGameActions)cmd), flags, GetState(), GetNextState(),
+			IsPending() ? 1 : 0, IsZoomed() ? 1 : 0, iAmmoElapsed);
+	}
+
+	if (inherited::Action(cmd, flags))
+	{
+		if (trace)
+			WPN_TRACE("Weapon::Action consumed by inherited weapon=%s cmd=%u", cName().c_str(), cmd);
+		return true;
+	}
 
 	CActor* pActor = smart_cast<CActor*>(H_Parent());
 
 	switch (cmd)
 	{
 	case kWPN_FIRE:
-		if (IsPending())
+		if (OnServer() && m_awaiting_local_ammo_sync_after_reload)
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action fire blocked: awaiting local ammo sync weapon=%s", cName().c_str());
 			return false;
+		}
+		if (IsPending())
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action fire blocked: pending weapon=%s", cName().c_str());
+			return false;
+		}
+		if (GetState() == eReload || GetNextState() == eReload)
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action fire blocked: reload weapon=%s state=%u next=%u",
+					cName().c_str(), GetState(), GetNextState());
+			return false;
+		}
 
 		if (flags & CMD_START)
 		{
+			if (trace)
+				WPN_TRACE("Weapon::Action fire start weapon=%s misfire=%d", cName().c_str(), bMisfire ? 1 : 0);
 			if (pActor && pActor->is_safemode())
 			{
+				if (trace)
+					WPN_TRACE("Weapon::Action fire start toggles safemode off actor=%u", pActor->ID());
 				pActor->set_safemode(false);
 				return true;
 			}
 
 			if (bMisfire)
 			{
+				if (trace)
+					WPN_TRACE("Weapon::Action fire misfire click weapon=%s", cName().c_str());
 				OnEmptyClick();
 				if (!m_current_motion_def || !m_playFullShotAnim)
 					SwitchState(eIdle);
 			}
 			
+			if (trace)
+				WPN_TRACE("Weapon::Action fire start -> FireStart weapon=%s", cName().c_str());
 			FireStart();
 		}
 		else
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action fire stop -> FireEnd weapon=%s", cName().c_str());
 			FireEnd();
+		}
 		return true;
 	case kWPN_NEXT:
 		{
 			//Disabled for script usage
 			//return SwitchAmmoType(flags);
+			if (trace)
+				WPN_TRACE("Weapon::Action kWPN_NEXT ignored by design weapon=%s", cName().c_str());
 			return true;
 		}
 
 	case kWPN_ZOOM:
 		if (IsZoomEnabled())
 		{
+			if (trace)
+				WPN_TRACE("Weapon::Action zoom enabled weapon=%s toggle_mode=%d", cName().c_str(), psActorFlags.test(AF_AIM_TOGGLE) ? 1 : 0);
 			if (psActorFlags.test(AF_AIM_TOGGLE))
 			{
 				if (flags & CMD_START)
@@ -1460,6 +1743,8 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 								SwitchState(eIdle);
 
 							OnZoomIn();
+							if (trace)
+								WPN_TRACE("Weapon::Action zoom in (toggle) weapon=%s", cName().c_str());
 						}
 					}
 					else
@@ -1468,6 +1753,8 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 							SwitchState(eAimEnd);
 
 						OnZoomOut();
+						if (trace)
+							WPN_TRACE("Weapon::Action zoom out (toggle) weapon=%s", cName().c_str());
 					}
 				}
 			}
@@ -1486,6 +1773,8 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 							SwitchState(eIdle);
 
 						OnZoomIn();
+						if (trace)
+							WPN_TRACE("Weapon::Action zoom in weapon=%s", cName().c_str());
 					}
 				}
 				else if (IsZoomed())
@@ -1493,23 +1782,36 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 					if (GetState() != eAimEnd && HudAnimationExist("anm_idle_aim_end"))
 						SwitchState(eAimEnd);
 					OnZoomOut();
+					if (trace)
+						WPN_TRACE("Weapon::Action zoom out weapon=%s", cName().c_str());
 				}
 			}
 			return true;
 		}
 		else
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action zoom ignored: zoom disabled weapon=%s", cName().c_str());
 			return false;
+		}
 
 	case kWPN_ZOOM_INC:
 	case kWPN_ZOOM_DEC:
 		if (IsZoomEnabled() && IsZoomed() && (flags & CMD_START))
 		{
+			if (trace)
+				WPN_TRACE("Weapon::Action zoom adjust weapon=%s cmd=%u", cName().c_str(), cmd);
 			if (cmd == kWPN_ZOOM_INC) ZoomInc();
 			else ZoomDec();
 			return true;
 		}
 		else
+		{
+			if (trace)
+				WPN_TRACE("Weapon::Action zoom adjust ignored weapon=%s zoom_enabled=%d zoomed=%d flags=0x%08x",
+					cName().c_str(), IsZoomEnabled() ? 1 : 0, IsZoomed() ? 1 : 0, flags);
 			return false;
+		}
 	case kWPN_FUNC:
 		{
 			if (flags & CMD_START && !IsPending())
@@ -1517,8 +1819,13 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 				if (pActor && pActor->is_safemode())
 					pActor->set_safemode(false);
 
+				if (trace)
+					WPN_TRACE("Weapon::Action zoom type switch weapon=%s", cName().c_str());
 				SwitchZoomType();
 			}
+			else if (trace)
+				WPN_TRACE("Weapon::Action zoom type switch ignored weapon=%s pending=%d flags=0x%08x",
+					cName().c_str(), IsPending() ? 1 : 0, flags);
 			return true;
 		}
 	case kSAFEMODE:
@@ -1533,7 +1840,12 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 					PlayBlendAnm(m_safemode_anm[1].name, m_safemode_anm[1].speed, m_safemode_anm[1].power, false);
 				else if (m_safemode_anm[0].name)
 					PlayBlendAnm(m_safemode_anm[0].name, m_safemode_anm[0].speed, m_safemode_anm[0].power, false);
+				if (trace)
+					WPN_TRACE("Weapon::Action safemode toggled weapon=%s new_state=%d", cName().c_str(), new_state ? 1 : 0);
 			}
+			else if (trace)
+				WPN_TRACE("Weapon::Action safemode ignored weapon=%s has_actor=%d pending=%d flags=0x%08x can_lower=%d",
+					cName().c_str(), pActor ? 1 : 0, IsPending() ? 1 : 0, flags, m_bCanBeLowered ? 1 : 0);
 			return true;
 		}
 	case kCUSTOM16:
@@ -1542,11 +1854,18 @@ bool CWeapon::Action(u16 cmd, u32 flags)
 			if (pActor && pActor->is_safemode())
 				pActor->set_safemode(false);
 			
+			if (trace)
+				WPN_TRACE("Weapon::Action toggle grenade launcher weapon=%s", cName().c_str());
 			ToggleGrenadeLauncher();
 		}
+		else if (trace)
+			WPN_TRACE("Weapon::Action toggle grenade launcher ignored weapon=%s keybind=%d pending=%d flags=0x%08x",
+				cName().c_str(), useSeparateUBGLKeybind ? 1 : 0, IsPending() ? 1 : 0, flags);
 		return true;
 	break;
 	}
+	if (trace)
+		WPN_TRACE("Weapon::Action not handled weapon=%s cmd=%u", cName().c_str(), cmd);
 	return false;
 }
 
@@ -1582,7 +1901,16 @@ bool CWeapon::SwitchAmmoType(u32 flags)
 void CWeapon::SpawnAmmo(u32 boxCurr, LPCSTR ammoSect, u32 ParentID)
 {
 	if (m_ammoTypes.empty()) return;
-	if (OnClient()) return;
+	const bool dedicated_single_local_weapon = IsDedicatedSingleLocalWeapon(this);
+	if (OnClient() && !dedicated_single_local_weapon) return;
+	WPN_TRACE("Weapon::SpawnAmmo weapon=%s box=%u ammo=%s parent=%u on_client=%d on_server=%d dedicated_single_local=%d",
+		cName().c_str(),
+		boxCurr,
+		ammoSect ? ammoSect : "<auto>",
+		ParentID,
+		OnClient() ? 1 : 0,
+		OnServer() ? 1 : 0,
+		dedicated_single_local_weapon ? 1 : 0);
 	m_bAmmoWasSpawned = true;
 
 	int l_type = 0;
@@ -2092,7 +2420,43 @@ CUIWindow* CWeapon::ZoomTexture()
 
 void CWeapon::SwitchState(u32 S)
 {
-	if (OnClient()) return;
+	const bool dedicated_single_local_weapon = IsDedicatedSingleLocalWeapon(this);
+	CActor* actor_owner = smart_cast<CActor*>(H_Parent());
+	if (dedicated_single_local_weapon && actor_owner && S == eShowing)
+	{
+		const u16 active_slot = actor_owner->inventory().GetActiveSlot();
+		const u16 next_slot = actor_owner->inventory().GetNextActiveSlot();
+		if (next_slot == NO_ACTIVE_SLOT)
+		{
+			WPN_TRACE("Weapon::SwitchState blocked eShowing during holster weapon=%s actor=%u active=%u next=%u state=%u next_state=%u",
+				cName().c_str(),
+				actor_owner->ID(),
+				active_slot,
+				next_slot,
+				GetState(),
+				GetNextState());
+			return;
+		}
+	}
+	WPN_TRACE("Weapon::SwitchState weapon=%s from=%u to=%u local=%d remote=%d on_client=%d on_server=%d dedicated_single_local=%d destroy=%d has_inventory=%d",
+		cName().c_str(), GetState(), S,
+		Local() ? 1 : 0, Remote() ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0,
+		dedicated_single_local_weapon ? 1 : 0,
+		CHudItem::object().getDestroy() ? 1 : 0,
+		m_pInventory ? 1 : 0);
+	if (OnClient() && !dedicated_single_local_weapon)
+	{
+		// Dedicated-single bridge:
+		// non-owner client copies still need to execute local visual state machine.
+		// Relying on Remote() is unsafe here: some replicated items may be Local()==0/Remote()==0
+		// yet still represent another actor's weapon on this client.
+		const u32 old_state_client_copy = GetState();
+		SetNextState(S);
+		WPN_TRACE("Weapon::SwitchState non-owner client immediate OnStateSwitch weapon=%s target=%u old=%u remote=%d",
+			cName().c_str(), S, old_state_client_copy, Remote() ? 1 : 0);
+		OnStateSwitch(S, old_state_client_copy);
+		return;
+	}
 
 #ifndef MASTER_GOLD
     if ( bDebug )
@@ -2102,10 +2466,17 @@ void CWeapon::SwitchState(u32 S)
     }
 #endif // #ifndef MASTER_GOLD
 
+	const u32 old_state = GetState();
 	SetNextState(S);
-	if (CHudItem::object().Local() && !CHudItem::object().getDestroy() && m_pInventory && OnServer())
+
+	if (dedicated_single_local_weapon)
 	{
-		// !!! Just single entry for given state !!!
+		WPN_TRACE("Weapon::SwitchState immediate OnStateSwitch for local dedicated-single weapon=%s target=%u", cName().c_str(), S);
+		OnStateSwitch(S, old_state);
+	}
+
+	if (!CHudItem::object().getDestroy() && m_pInventory && OnServer())
+	{
 		NET_Packet P;
 		CHudItem::object().u_EventGen(P, GE_WPN_STATE_CHANGE, CHudItem::object().ID());
 		P.w_u8(u8(S));
@@ -2114,6 +2485,14 @@ void CWeapon::SwitchState(u32 S)
 		P.w_u8(u8(iAmmoElapsed & 0xff));
 		P.w_u8(m_set_next_ammoType_on_reload);
 		CHudItem::object().u_EventSend(P, net_flags(TRUE, TRUE, FALSE, TRUE));
+		WPN_TRACE("Weapon::SwitchState sent GE_WPN_STATE_CHANGE weapon=%s to=%u sub_state=%u ammo=%d next_ammo=%u",
+			cName().c_str(), S, m_sub_state, iAmmoElapsed, m_set_next_ammoType_on_reload);
+	}
+	else
+	{
+		WPN_TRACE("Weapon::SwitchState no network event sent weapon=%s to=%u reason destroy=%d inventory=%d on_server=%d dedicated_single_local=%d",
+			cName().c_str(), S, CHudItem::object().getDestroy() ? 1 : 0, m_pInventory ? 1 : 0,
+			OnServer() ? 1 : 0, dedicated_single_local_weapon ? 1 : 0);
 	}
 }
 
@@ -2244,6 +2623,16 @@ int g_iWeaponRemove = 1;
 
 bool CWeapon::NeedToDestroyObject() const
 {
+	// Dedicated-single MP bridge:
+	// weapon drop lifetime must stay server-authoritative, but never auto-self-destroy
+	// from local object scheduling on either pure client or dedicated host side.
+	// Otherwise GE_DESTROY may arrive right after GE_OWNERSHIP_REJECT and kill
+	// dropped weapon before remote clients can see normal falling physics.
+	if (OnClient() && !OnServer())
+		return false;
+	if (OnServer() && g_dedicated_server)
+		return false;
+
 	if (Remote()) return false;
 	if (H_Parent()) return false;
 	if (g_iWeaponRemove == -1) return false;
@@ -3027,6 +3416,8 @@ const float& CWeapon::hit_probability() const
 
 void CWeapon::OnStateSwitch(u32 S, u32 oldState)
 {
+	WPN_TRACE("Weapon::OnStateSwitch weapon=%s from=%u to=%u ammo=%d pending=%d zoomed=%d",
+		cName().c_str(), oldState, S, iAmmoElapsed, IsPending() ? 1 : 0, IsZoomed() ? 1 : 0);
 	inherited::OnStateSwitch(S, oldState);
 	m_BriefInfo_CalcFrame = 0;
 

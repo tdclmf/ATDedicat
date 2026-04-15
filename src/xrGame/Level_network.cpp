@@ -19,9 +19,17 @@
 #include "UI/UIGameTutorial.h"
 #include "ui/UIPdaWnd.h"
 #include "../xrNetServer/NET_AuthCheck.h"
+#include "Actor.h"
 
 #include "../xrphysics/physicscommon.h"
 extern ENGINE_API bool g_dedicated_server;
+
+namespace luabind
+{
+	template <class Signature>
+	class functor;
+}
+extern luabind::functor<void>* CGameObject_NetDestroy;
 
 const int max_objects_size = 2 * 1024;
 const int max_objects_size_in_save = 8 * 1024;
@@ -32,6 +40,19 @@ void CLevel::remove_objects()
 {
 	Msg("CLevel::remove_objects - Start");
 	BOOL b_stored = psDeviceFlags.test(rsDisableObjectsAsCrows);
+
+	luabind::functor<void>* saved_net_destroy_callback = nullptr;
+	const bool disable_net_destroy_lua_callbacks =
+		g_dedicated_server &&
+		game &&
+		game->Type() == eGameIDSingle;
+
+	if (disable_net_destroy_lua_callbacks)
+	{
+		saved_net_destroy_callback = CGameObject_NetDestroy;
+		CGameObject_NetDestroy = nullptr;
+		Msg("--- [SV] Dedicated single: temporarily disabled CGameObject net_destroy Lua callback during remove_objects.");
+	}
 
 	int loop = 5;
 	while (loop)
@@ -101,6 +122,12 @@ void CLevel::remove_objects()
 	//.	xr_delete									(m_seniority_hierarchy_holder);
 	//.	m_seniority_hierarchy_holder				= xr_new<CSeniorityHierarchyHolder>();
 	if (!IsGameTypeSingle()) Msg("CLevel::remove_objects - End");
+
+	if (disable_net_destroy_lua_callbacks)
+	{
+		CGameObject_NetDestroy = saved_net_destroy_callback;
+		Msg("--- [SV] Dedicated single: restored CGameObject net_destroy Lua callback after remove_objects.");
+	}
 }
 
 #ifdef DEBUG
@@ -165,7 +192,12 @@ void CLevel::net_Stop()
 
 void CLevel::ClientSend()
 {
-	if (OnClient() && !net_HasBandwidth())
+	const bool single_bridge_mode =
+		!g_dedicated_server &&
+		game &&
+		Game().Type() == eGameIDSingle;
+
+	if (OnClient() && !net_HasBandwidth() && !single_bridge_mode)
 		return;
 
 	NET_Packet P;
@@ -174,7 +206,27 @@ void CLevel::ClientSend()
 	if (!g_dedicated_server)
 	{
 		CObject* pObj = CurrentControlEntity();
-		if (pObj && !pObj->getDestroy() && pObj->net_Relevant())
+
+		// Dedicated-single bridge:
+		// CurrentControlEntity may still point to spectator shell while player is
+		// already controlling actor. Prefer actor entity in this mode.
+		if (single_bridge_mode)
+		{
+			CObject* entity = CurrentEntity();
+			if (!smart_cast<CActor*>(pObj) && smart_cast<CActor*>(entity))
+				pObj = entity;
+		}
+
+		const bool force_single_actor_update =
+			single_bridge_mode &&
+			(smart_cast<CActor*>(pObj) != nullptr);
+		static u32 s_last_forced_actor_send = 0;
+		const u32 forced_send_interval_ms = 33;
+		const bool force_send_rate_limited =
+			force_single_actor_update &&
+			(Device.dwTimeGlobal - s_last_forced_actor_send < forced_send_interval_ms);
+
+		if (pObj && !pObj->getDestroy() && !force_send_rate_limited && (pObj->net_Relevant() || force_single_actor_update))
 		{
 			P.w_begin(M_CL_UPDATE);
 			P.w_u16(u16(pObj->ID()));
@@ -183,7 +235,11 @@ void CLevel::ClientSend()
 			pObj->net_Export(P);
 
 			if (P.B.count > 9)
+			{
 				Send(P, net_flags(FALSE));
+				if (force_single_actor_update)
+					s_last_forced_actor_send = Device.dwTimeGlobal;
+			}
 		}
 	}
 	if (m_file_transfer)

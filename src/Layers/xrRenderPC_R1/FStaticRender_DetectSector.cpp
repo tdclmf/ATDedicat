@@ -64,13 +64,22 @@ IRender_Sector* CRender::detectSector(const Fvector& P)
 	{
 		// Take sector, facing to our point from portal
 		CDB::TRI* pTri = rmPortals->get_tris() + ID;
-		CPortal* pPortal = (CPortal*)Portals[pTri->dummy];
-		return pPortal->getSectorFacing(P);
+		if (pTri->dummy < Portals.size())
+		{
+			if (CPortal* pPortal = (CPortal*)Portals[pTri->dummy])
+				return pPortal->getSectorFacing(P);
+		}
 	}
 	else
 	{
 		// Take triangle at ID and use it's Sector
 		CDB::TRI* pTri = g_pGameLevel->ObjectSpace.GetStaticTris() + ID;
-		return getSector(pTri->sector);
+		if (pTri->sector < Sectors.size())
+		{
+			if (IRender_Sector* sector = getSector(pTri->sector))
+				return sector;
+		}
 	}
+
+	return 0;
 }

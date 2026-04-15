@@ -10,6 +10,7 @@
 #include "alife_object_registry.h"
 #include "xrServer_Objects_ALife_Items.h"
 #include "xrServer_Objects_ALife_Monsters.h"
+#include "weapon_trace.h"
 
 void xrServer::Process_event(NET_Packet& P, ClientID sender)
 {
@@ -55,8 +56,18 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 	case GEG_PLAYER_ITEM2SLOT:
 	case GEG_PLAYER_ITEM2BELT:
 	case GEG_PLAYER_ITEM2RUCK:
+		{
+			SendBroadcast(BroadcastCID, P, MODE);
+		}
+		break;
 	case GE_GRENADE_EXPLODE:
 		{
+			xrClientData* sender_client = ID_to_client(sender);
+			WPN_TRACE("xrServer::Process_event GE_GRENADE_EXPLODE relay sender=0x%08x dest=%u sender_client=%s sv_client=%s",
+				sender.value(),
+				destination,
+				sender_client ? sender_client->name.c_str() : "<none>",
+				SV_Client ? SV_Client->name.c_str() : "<none>");
 			SendBroadcast(BroadcastCID, P, MODE);
 		}
 		break;
@@ -69,7 +80,28 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 		{
 			xrClientData* CL = ID_to_client(sender);
 			if (CL) CL->net_Ready = TRUE;
+			WPN_TRACE("xrServer::Process_event GE_INV_ACTION sender=0x%08x dest=%u sv_client=%u sender_client=%s receiver=%s",
+				sender.value(),
+				destination,
+				SV_Client ? SV_Client->ID.value() : 0,
+				CL ? CL->name.c_str() : "<none>",
+				receiver ? receiver->name_replace() : "<none>");
 			if (SV_Client) SendTo(SV_Client->ID, P, net_flags(TRUE, TRUE));
+			else WPN_TRACE("xrServer::Process_event GE_INV_ACTION: SV_Client is null, packet dropped sender=0x%08x", sender.value());
+		}
+		break;
+	case GE_WPN_AMMO_SYNC:
+		{
+			xrClientData* CL = ID_to_client(sender);
+			if (CL) CL->net_Ready = TRUE;
+			WPN_TRACE("xrServer::Process_event GE_WPN_AMMO_SYNC sender=0x%08x dest=%u sv_client=%u sender_client=%s receiver=%s",
+				sender.value(),
+				destination,
+				SV_Client ? SV_Client->ID.value() : 0,
+				CL ? CL->name.c_str() : "<none>",
+				receiver ? receiver->name_replace() : "<none>");
+			if (SV_Client) SendTo(SV_Client->ID, P, net_flags(TRUE, TRUE));
+			else WPN_TRACE("xrServer::Process_event GE_WPN_AMMO_SYNC: SV_Client is null, packet dropped sender=0x%08x", sender.value());
 		}
 		break;
 	case GE_RESPAWN:
@@ -105,9 +137,16 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 		break;
 	case GE_TRADE_SELL:
 	case GE_OWNERSHIP_REJECT:
-	case GE_LAUNCH_ROCKET:
 		{
 			Process_event_reject(P, sender, timestamp, destination, P.r_u16());
+#ifdef DEBUG
+			VERIFY(verify_entities());
+#endif
+		}
+		break;
+	case GE_LAUNCH_ROCKET:
+		{
+			Process_event_reject(P, sender, timestamp, destination, P.r_u16(), true, true);
 #ifdef DEBUG
 			VERIFY(verify_entities());
 #endif
@@ -125,8 +164,8 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 		{
 			u16 id_entity;
 			P.r_u16(id_entity);
-			CSE_Abstract* e_parent = receiver; // êòî çàáèðàåò (äëÿ ñâîèõ íóæä)
-			CSE_Abstract* e_entity = game->get_entity_from_eid(id_entity); // êòî îòäàåò
+			CSE_Abstract* e_parent = receiver; // ÐºÑ‚Ð¾ Ð·Ð°Ð±Ð¸Ñ€Ð°ÐµÑ‚ (Ð´Ð»Ñ ÑÐ²Ð¾Ð¸Ñ… Ð½ÑƒÐ¶Ð´)
+			CSE_Abstract* e_entity = game->get_entity_from_eid(id_entity); // ÐºÑ‚Ð¾ Ð¾Ñ‚Ð´Ð°ÐµÑ‚
 			if (!e_entity) break;
 			if (0xffff != e_entity->ID_Parent) break; // this item already taken
 			xrClientData* c_parent = e_parent->owner;
@@ -160,7 +199,7 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 			u16 id_src;
 			P.r_u16(id_src);
 
-			CSE_Abstract* e_dest = receiver; // êòî óìåð
+			CSE_Abstract* e_dest = receiver; // ÐºÑ‚Ð¾ ÑƒÐ¼ÐµÑ€
 			// this is possible when hit event is sent before destroy event
 			if (!e_dest)
 				break;
@@ -179,7 +218,33 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 			VERIFY(visual);
 			string256 tmp;
 			P.r_stringZ(tmp);
-			visual->set_visual(tmp);
+
+			xrClientData* sender_client = ID_to_client(sender);
+			const bool sender_is_server_client = sender_client && (sender_client == GetServerClient());
+			const bool sender_owns_receiver = sender_client && sender_client->owner && sender_client->owner->ID == destination;
+			if (!sender_is_server_client && !sender_owns_receiver)
+			{
+				Msg("! [SV] GE_CHANGE_VISUAL rejected: sender 0x%08x does not own object [%u].", sender.value(), destination);
+				break;
+			}
+
+			if (tmp[0])
+				visual->set_visual(tmp);
+
+			if (sender_owns_receiver && tmp[0])
+			{
+				sender_client->m_requested_player_visual = tmp;
+				Msg("--- [SV] Dedicated single bridge: cached player visual [%s] for [%s] (id=%u).",
+					tmp, sender_client->name.c_str(), destination);
+			}
+
+			NET_Packet visual_sync;
+			visual_sync.w_begin(M_EVENT);
+			visual_sync.w_u32(timestamp);
+			visual_sync.w_u16(GE_CHANGE_VISUAL);
+			visual_sync.w_u16(destination);
+			visual_sync.w_stringZ(tmp);
+			SendBroadcast(BroadcastCID, visual_sync, MODE);
 		}
 		break;
 	case GE_DIE:
@@ -195,14 +260,14 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 			if (l_pC && l_pC->owner)
 				Msg("* [%2d] killed by [%2d] - sended by [0x%08x]", id_dest, id_src, l_pC->ID.value());
 
-			CSE_Abstract* e_dest = receiver; // êòî óìåð
+			CSE_Abstract* e_dest = receiver; // ÐºÑ‚Ð¾ ÑƒÐ¼ÐµÑ€
 			// this is possible when hit event is sent before destroy event
 			if (!e_dest)
 				break;
 
 			Msg("* [%2d] is [%s:%s]", id_dest, *e_dest->s_name, e_dest->name_replace());
 
-			CSE_Abstract* e_src = game->get_entity_from_eid(id_src); // êòî óáèë
+			CSE_Abstract* e_src = game->get_entity_from_eid(id_src); // ÐºÑ‚Ð¾ ÑƒÐ±Ð¸Ð»
 			if (!e_src)
 			{
 				xrClientData* C = (xrClientData*)game->get_client(id_src);
@@ -219,7 +284,7 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 
 			game->on_death(e_dest, e_src);
 
-			xrClientData* c_src = e_src->owner; // êëèåíò, ÷åé þíèò óáèë
+			xrClientData* c_src = e_src->owner; // ÐºÐ»Ð¸ÐµÐ½Ñ‚, Ñ‡ÐµÐ¹ ÑŽÐ½Ð¸Ñ‚ ÑƒÐ±Ð¸Ð»
 
 			if (c_src->owner->ID == id_src)
 			{
@@ -311,6 +376,8 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 	case GEG_PLAYER_DISABLE_SPRINT:
 	case GEG_PLAYER_WEAPON_HIDE_STATE:
 		{
+			WPN_TRACE("xrServer::Process_event route event type=%u to SV_Client=%u destination=%u",
+				type, SV_Client ? SV_Client->ID.value() : 0, destination);
 			SendTo(SV_Client->ID, P, net_flags(TRUE, TRUE));
 
 #	ifdef SLOW_VERIFY_ENTITIES
@@ -321,6 +388,8 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 	case GEG_PLAYER_ACTIVATE_SLOT:
 	case GEG_PLAYER_ITEM_EAT:
 		{
+			WPN_TRACE("xrServer::Process_event route event type=%u to SV_Client=%u destination=%u",
+				type, SV_Client ? SV_Client->ID.value() : 0, destination);
 			SendTo(SV_Client->ID, P, net_flags(TRUE, TRUE));
 #	ifdef SLOW_VERIFY_ENTITIES
 			VERIFY					(verify_entities());

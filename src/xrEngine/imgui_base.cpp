@@ -20,7 +20,8 @@ namespace xr_imgui
     static bool imgui_metrics = false;
 
     ide::ide()
-        : keyboard_code_page(CP_ACP), m_backend_data(nullptr), m_input(false), m_render(nullptr), m_shown(false), firstframe(true)
+        : keyboard_code_page(CP_ACP), m_backend_data(nullptr), m_input(false), m_render(nullptr), m_shown(false), firstframe(true),
+          m_io_paths_allocated(false), m_runtime_registered(false)
     {
         ImGui::SetAllocatorFunctions(
             [](size_t size, void* /*user_data*/)
@@ -85,6 +86,7 @@ namespace xr_imgui
 
         FS.update_path(fName, "$logs$", io.LogFilename);
         io.LogFilename = xr_strdup(fName);
+        m_io_paths_allocated = true;
 
         string_path configPath;
         FS.update_path(configPath, "$game_textures$", "fonts\\$default.ltx");
@@ -126,16 +128,27 @@ namespace xr_imgui
 
         Device.seqFrame.Add(this, -5);
         Device.seqRender.Add(this, -5);
+        m_runtime_registered = true;
     }
 
     void ide::OnAppEnd()
     {
         ImGuiIO& io = ImGui::GetIO();
-        xr_free(io.IniFilename);
-        xr_free(io.LogFilename);
+        if (m_io_paths_allocated)
+        {
+            xr_free(io.IniFilename);
+            xr_free(io.LogFilename);
+            io.IniFilename = nullptr;
+            io.LogFilename = nullptr;
+            m_io_paths_allocated = false;
+        }
 
-        Device.seqFrame.Remove(this);
-        Device.seqRender.Remove(this);
+        if (m_runtime_registered)
+        {
+            Device.seqFrame.Remove(this);
+            Device.seqRender.Remove(this);
+            m_runtime_registered = false;
+        }
     }
 
     void ide::OnScreenResolutionChanged()
@@ -334,8 +347,8 @@ namespace xr_imgui
 //-----------------------------------------------------------------------------
 // Custom font data (Hack-Regular.ttf)
 //-----------------------------------------------------------------------------
-// Hack work is © 2018 Source Foundry Authors. MIT License
-// Bitstream Vera Sans Mono © 2003 Bitstream, Inc. (with Reserved Font Names Bitstream and Vera).Bitstream Vera License.
+// Hack work is Â© 2018 Source Foundry Authors. MIT License
+// Bitstream Vera Sans Mono Â© 2003 Bitstream, Inc. (with Reserved Font Names Bitstream and Vera).Bitstream Vera License.
 // The font binaries are released under a license that permits unlimited print, desktop, web, and software embedding use for commercial and non - commercial applications.
 // MIT license (see https://github.com/source-foundry/Hack/blob/master/LICENSE.md)
 // Download and more information at https://github.com/source-foundry/Hack

@@ -220,6 +220,7 @@ public:
     // Утилиты
     int GetPort() { return psNET_Port; }
     u32 GetClientsCount() { return net_players.ClientsCount(); }
+    u32 GetRemoteConnectedClientsCount();
     IClient* GetServerClient() { return SV_Client; }
     const shared_str& GetConnectOptions() const { return connect_options; }
 

@@ -70,6 +70,7 @@ public:
 	virtual void assign_RP(CSE_Abstract* E, game_PlayerState* ps_who);
 	virtual void RespawnPlayer(ClientID id_who, bool bReady) override;
 	virtual void OnPlayerConnect(ClientID id_who);
+	virtual void OnPlayerDisconnect(ClientID id_who, LPSTR Name, u16 GameID) override;
 	virtual void OnPlayerConnectFinished(ClientID id_who);
 	virtual void OnPlayerReady(ClientID id);
 	virtual void SetSkin(CSE_Abstract* E, u16 Team, u16 ID);

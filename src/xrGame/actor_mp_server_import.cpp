@@ -3,6 +3,7 @@
 //#include "Physics.h"
 //#include "mathutils.h"
 #include "../xrphysics/phvalide.h"
+#include "weapon_trace.h"
 
 void CSE_ActorMP::UPDATE_Read(NET_Packet& packet)
 {
@@ -37,11 +38,17 @@ void CSE_ActorMP::UPDATE_Read(NET_Packet& packet)
 
 	timestamp = m_state_holder.state().time;
 
+	const u8 prev_weapon_slot = weapon;
 	weapon = m_state_holder.state().inventory_active_slot;
 	mstate = m_state_holder.state().body_state_flags;
 	set_health(m_state_holder.state().health);
 	fRadiation = m_state_holder.state().radiation;
 	m_AliveState.enabled = m_state_holder.state().physics_state_enabled;
+	if (prev_weapon_slot != weapon)
+	{
+		WPN_TRACE("ActorMP::UPDATE_Read server actor=%u weapon_slot=%u->%u health=%.3f mstate=0x%08x",
+			ID, prev_weapon_slot, weapon, get_health(), mstate);
+	}
 
 	m_ready_to_update = true;
 	//Msg("--- Client 0x%08x UPDATE_Read, health is: %2.04f", this->ID, m_state_holder.state().health);

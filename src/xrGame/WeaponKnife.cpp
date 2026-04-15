@@ -15,6 +15,8 @@
 #include "player_hud.h"
 #include "ActorEffector.h"
 
+extern ENGINE_API bool g_dedicated_server;
+
 #define KNIFE_MATERIAL_NAME "objects\\knife"
 
 #ifdef DEBUG
@@ -270,6 +272,10 @@ void CWeaponKnife::UpdateCL()
 {
 	inherited::UpdateCL();
 
+	// Dedicated server has no HUD animation callback, so we advance attack -> idle by time.
+	if (g_dedicated_server && (GetState() == eFire || GetState() == eFire2) && CurrStateTime() > 120)
+		SwitchState(eIdle);
+
 	Fvector P = get_LastFP();
 	m_sounds.UpdateAllSoundsPositions(P);
 }
@@ -285,6 +291,7 @@ void CWeaponKnife::switch2_Attacking(u32 state)
 		PlayHUDMotion("anm_attack2", TRUE, this, state);
 
 	SetPending(TRUE);
+
 }
 
 void CWeaponKnife::switch2_Idle()

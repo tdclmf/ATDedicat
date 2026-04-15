@@ -37,30 +37,122 @@
 #include "holder_custom.h"
 #include "Weapon.h"
 #include "CustomOutfit.h"
+#include "3rd party/luabind/luabind/luabind.hpp"
+#include "weapon_trace.h"
 
 extern u32 hud_adj_mode;
 
+static bool IsWeaponTraceCmd(int cmd)
+{
+	switch (cmd)
+	{
+	case kWPN_1:
+	case kWPN_2:
+	case kWPN_3:
+	case kWPN_4:
+	case kWPN_5:
+	case kWPN_6:
+	case kWPN_FIRE:
+	case kWPN_RELOAD:
+	case kWPN_ZOOM:
+	case kWPN_NEXT:
+	case kWPN_FUNC:
+	case kWPN_FIREMODE_NEXT:
+	case kWPN_FIREMODE_PREV:
+	case kNEXT_SLOT:
+	case kPREV_SLOT:
+	case kDROP:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static LPCSTR WeaponTraceActionName(int cmd)
+{
+	return id_to_action_name((EGameActions)cmd);
+}
+
+namespace
+{
+bool IsMPActorSectionName(const CGameObject* object)
+{
+	return object && (xr_strcmp(object->cNameSect().c_str(), "mp_actor") == 0);
+}
+
+bool IsMPActorTalkBlocked(const CActor* actor, const CInventoryOwner* partner)
+{
+	const CGameObject* actor_object = smart_cast<const CGameObject*>(actor);
+	const CGameObject* partner_object = smart_cast<const CGameObject*>(partner);
+	return IsMPActorSectionName(actor_object) && IsMPActorSectionName(partner_object);
+}
+}
+
 void CActor::IR_OnKeyboardPress(int cmd)
 {
-	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT) || g_dedicated_server) return;
+	const bool trace = IsWeaponTraceCmd(cmd);
+	if (trace)
+	{
+		WPN_TRACE("Actor::IR_OnKeyboardPress actor=%u cmd=%d(%s) local=%d remote=%d alive=%d dedicated=%d on_client=%d on_server=%d",
+			ID(), cmd, WeaponTraceActionName(cmd), Local() ? 1 : 0, Remote() ? 1 : 0, g_Alive() ? 1 : 0,
+			g_dedicated_server ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0);
+	}
 
-	if (Remote()) return;
+	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT))
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress blocked: hud_adj_mode+shift actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
-	if (IsTalking()) return;
-	if (m_input_external_handler && !m_input_external_handler->authorized(cmd)) return;
+	if (Remote())
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress blocked: Remote actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
+
+	if (IsTalking())
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress blocked: IsTalking actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
+	if (m_input_external_handler && !m_input_external_handler->authorized(cmd))
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress blocked: external handler denied actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
 	switch (cmd)
 	{
 	case kWPN_FIRE:
 		{
-			if (OnClient()) return;
+			u16 slot = inventory().GetActiveSlot();
+			if (inventory().ActiveItem() && (slot == INV_SLOT_3 || slot == INV_SLOT_2))
+				mstate_wishful &= ~mcSprint;
+			if (trace)
+			{
+				WPN_TRACE("Actor::IR_OnKeyboardPress fire branch actor=%u slot=%u active_item=%s sprint_state=%u",
+					ID(), slot, inventory().ActiveItem() ? inventory().ActiveItem()->object().cName().c_str() : "<none>",
+					(mstate_wishful & mcSprint) ? 1 : 0);
+			}
 
 			// Tronex: export to allow/prevent weapon fire if returned false
 			extern luabind::functor<bool>* CActor_Fire;
-			if (CActor_Fire)
+			const bool allow_fire_lua_callback = (CActor_Fire != nullptr) && !g_dedicated_server;
+			if ((CActor_Fire != nullptr) && g_dedicated_server && trace)
+			{
+				// Dedicated server does not have client-side db.actor context used by this callback.
+				WPN_TRACE("Actor::IR_OnKeyboardPress fire callback skipped on dedicated actor=%u", ID());
+			}
+			if (allow_fire_lua_callback)
 			{
 				if (!(*CActor_Fire)())
 				{
+					if (trace)
+						WPN_TRACE("Actor::IR_OnKeyboardPress fire blocked by script callback actor=%u", ID());
 					return;
 				}
 			}
@@ -72,7 +164,11 @@ void CActor::IR_OnKeyboardPress(int cmd)
 				P.w_begin(M_PLAYER_FIRE);
 				P.w_u16(ID());
 				u_EventSend(P);
+				if (trace)
+					WPN_TRACE("Actor::IR_OnKeyboardPress sent M_PLAYER_FIRE actor=%u", ID());
 			}
+			else if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardPress fire: OnServer=false, no M_PLAYER_FIRE actor=%u", ID());
 		}
 		break;
 	default:
@@ -86,21 +182,45 @@ void CActor::IR_OnKeyboardPress(int cmd)
 		if (m_holder && kUSE != cmd)
 		{
 			m_holder->OnKeyboardPress(cmd);
-			if (m_holder->allowWeapon() && inventory().Action((u16)cmd, CMD_START)) return;
+			if (m_holder->allowWeapon())
+			{
+				const bool consumed = inventory().Action((u16)cmd, CMD_START);
+				if (trace)
+					WPN_TRACE("Actor::IR_OnKeyboardPress holder->inventory action actor=%u cmd=%d consumed=%d",
+						ID(), cmd, consumed ? 1 : 0);
+				if (consumed) return;
+			}
+			else if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardPress holder present but allowWeapon=false actor=%u cmd=%d", ID(), cmd);
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardPress exit after holder branch actor=%u cmd=%d", ID(), cmd);
 			return;
 		}
 		else
-			if (inventory().Action((u16)cmd, CMD_START)) return;
+		{
+			const bool consumed = inventory().Action((u16)cmd, CMD_START);
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardPress inventory action actor=%u cmd=%d consumed=%d",
+					ID(), cmd, consumed ? 1 : 0);
+			if (consumed) return;
+		}
 	}
 
 
 	if(psActorFlags.test(AF_NO_CLIP))
 	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress no-clip branch actor=%u cmd=%d", ID(), cmd);
 		NoClipFly(cmd);
 		return;
 	}
 
-	if (!g_Alive()) return;
+	if (!g_Alive())
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardPress blocked after inventory: actor dead actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
 	switch (cmd)
 	{
@@ -272,18 +392,32 @@ BOOL mouseWheelInvertChangeWeapons = FALSE;
 BOOL mouseWheelInvertZoom = FALSE;
 void CActor::IR_OnMouseWheel(int direction)
 {
-	if (g_dedicated_server) return;
+	WPN_TRACE("Actor::IR_OnMouseWheel actor=%u direction=%d dedicated=%d", ID(), direction, g_dedicated_server ? 1 : 0);
+	if (g_dedicated_server)
+	{
+		WPN_TRACE("Actor::IR_OnMouseWheel blocked: dedicated actor=%u", ID());
+		return;
+	}
 
 	if (hud_adj_mode)
 	{
 		g_player_hud->tune(Ivector().set(0, 0, direction));
+		WPN_TRACE("Actor::IR_OnMouseWheel hud tune mode actor=%u direction=%d", ID(), direction);
 		return;
 	}
 
 	if (mouseWheelInvertZoom) {
-		if (inventory().Action((direction > 0) ? (u16)kWPN_ZOOM_DEC : (u16)kWPN_ZOOM_INC, CMD_START)) return;
+		const u16 zoom_cmd = (direction > 0) ? (u16)kWPN_ZOOM_DEC : (u16)kWPN_ZOOM_INC;
+		const bool consumed = inventory().Action(zoom_cmd, CMD_START);
+		WPN_TRACE("Actor::IR_OnMouseWheel zoom action actor=%u cmd=%d(%s) consumed=%d",
+			ID(), zoom_cmd, WeaponTraceActionName(zoom_cmd), consumed ? 1 : 0);
+		if (consumed) return;
 	} else {
-		if (inventory().Action((direction > 0) ? (u16)kWPN_ZOOM_INC : (u16)kWPN_ZOOM_DEC, CMD_START)) return;
+		const u16 zoom_cmd = (direction > 0) ? (u16)kWPN_ZOOM_INC : (u16)kWPN_ZOOM_DEC;
+		const bool consumed = inventory().Action(zoom_cmd, CMD_START);
+		WPN_TRACE("Actor::IR_OnMouseWheel zoom action actor=%u cmd=%d(%s) consumed=%d",
+			ID(), zoom_cmd, WeaponTraceActionName(zoom_cmd), consumed ? 1 : 0);
+		if (consumed) return;
 	}
 
 	if (mouseWheelChangeWeapon) {
@@ -298,18 +432,41 @@ void CActor::IR_OnMouseWheel(int direction)
 			else
 				OnPrevWeaponSlot();
 		}
+		WPN_TRACE("Actor::IR_OnMouseWheel switched slot actor=%u direction=%d invert=%d",
+			ID(), direction, mouseWheelInvertChangeWeapons ? 1 : 0);
 	}
 }
 
 void CActor::IR_OnKeyboardRelease(int cmd)
 {
-	if (g_dedicated_server) return;
+	const bool trace = IsWeaponTraceCmd(cmd);
+	if (trace)
+	{
+		WPN_TRACE("Actor::IR_OnKeyboardRelease actor=%u cmd=%d(%s) local=%d remote=%d alive=%d dedicated=%d on_client=%d on_server=%d",
+			ID(), cmd, WeaponTraceActionName(cmd), Local() ? 1 : 0, Remote() ? 1 : 0, g_Alive() ? 1 : 0,
+			g_dedicated_server ? 1 : 0, OnClient() ? 1 : 0, OnServer() ? 1 : 0);
+	}
 
-	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT)) return;
+	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT))
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardRelease blocked: hud_adj_mode+shift actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
-	if (Remote()) return;
+	if (Remote())
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardRelease blocked: Remote actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
-	if (m_input_external_handler && !m_input_external_handler->authorized(cmd)) return;
+	if (m_input_external_handler && !m_input_external_handler->authorized(cmd))
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardRelease blocked: external handler denied actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
 	if (g_Alive())
 	{
@@ -320,11 +477,28 @@ void CActor::IR_OnKeyboardRelease(int cmd)
 		{
 			m_holder->OnKeyboardRelease(cmd);
 
-			if (m_holder->allowWeapon() && inventory().Action((u16)cmd, CMD_STOP)) return;
+			if (m_holder->allowWeapon())
+			{
+				const bool consumed = inventory().Action((u16)cmd, CMD_STOP);
+				if (trace)
+					WPN_TRACE("Actor::IR_OnKeyboardRelease holder->inventory action actor=%u cmd=%d consumed=%d",
+						ID(), cmd, consumed ? 1 : 0);
+				if (consumed) return;
+			}
+			else if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardRelease holder present but allowWeapon=false actor=%u cmd=%d", ID(), cmd);
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardRelease exit after holder branch actor=%u cmd=%d", ID(), cmd);
 			return;
 		}
 		else
-			if (inventory().Action((u16)cmd, CMD_STOP)) return;
+		{
+			const bool consumed = inventory().Action((u16)cmd, CMD_STOP);
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardRelease inventory action actor=%u cmd=%d consumed=%d",
+					ID(), cmd, consumed ? 1 : 0);
+			if (consumed) return;
+		}
 
 
 		switch (cmd)
@@ -335,25 +509,63 @@ void CActor::IR_OnKeyboardRelease(int cmd)
 			break;
 		}
 	}
+	else if (trace)
+	{
+		WPN_TRACE("Actor::IR_OnKeyboardRelease ignored because actor dead actor=%u cmd=%d", ID(), cmd);
+	}
 }
 
 void CActor::IR_OnKeyboardHold(int cmd)
 {
-	if (g_dedicated_server) return;
+	const bool trace = IsWeaponTraceCmd(cmd);
+	if (trace)
+		WPN_TRACE("Actor::IR_OnKeyboardHold actor=%u cmd=%d(%s)", ID(), cmd, WeaponTraceActionName(cmd));
+	if (g_dedicated_server)
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardHold blocked: dedicated actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
-	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT)) return;
+	if (hud_adj_mode && pInput->iGetAsyncKeyState(DIK_LSHIFT))
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardHold blocked: hud_adj_mode+shift actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 
-	if (Remote()) return;
+	if (Remote())
+	{
+		if (trace)
+			WPN_TRACE("Actor::IR_OnKeyboardHold blocked: Remote actor=%u cmd=%d", ID(), cmd);
+		return;
+	}
 	if(g_Alive())
 	{
-		if (m_input_external_handler && !m_input_external_handler->authorized(cmd)) return;
-		if (IsTalking()) return;
+		if (m_input_external_handler && !m_input_external_handler->authorized(cmd))
+		{
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardHold blocked: external handler denied actor=%u cmd=%d", ID(), cmd);
+			return;
+		}
+		if (IsTalking())
+		{
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardHold blocked: IsTalking actor=%u cmd=%d", ID(), cmd);
+			return;
+		}
 
 		if (m_holder)
 		{
 			m_holder->OnKeyboardHold(cmd);
+			if (trace)
+				WPN_TRACE("Actor::IR_OnKeyboardHold redirected to holder actor=%u cmd=%d", ID(), cmd);
 			return;
 		}
+	}
+	else if (trace)
+	{
+		WPN_TRACE("Actor::IR_OnKeyboardHold ignored because actor dead actor=%u cmd=%d", ID(), cmd);
 	}
 
 
@@ -600,10 +812,20 @@ void CActor::ActorUse()
 			VERIFY(pEntityAliveWeLookingAt);
 
 			if (pEntityAliveWeLookingAt->g_Alive())
-				TryToTalk();
+			{
+				if (IsMPActorTalkBlocked(this, m_pPersonWeLookingAt))
+				{
+					WPN_TRACE("Actor::ActorUse talk blocked for mp_actor pair actor=%u partner=%u",
+						ID(), m_pPersonWeLookingAt->object_id());
+				}
+				else
+				{
+					TryToTalk();
+				}
+			}
 			else if (!bCaptured)
 			{
-				//только если находимся в режиме single
+				// Single-player mode only.
 				CUIGameSP* pGameSP = smart_cast<CUIGameSP*>(CurrentGameUI());
 				if (pGameSP)
 				{

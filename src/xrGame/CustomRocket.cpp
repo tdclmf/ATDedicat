@@ -110,6 +110,55 @@ void CCustomRocket::SetLaunchParams(const Fmatrix& xform,
 }
 
 
+void CCustomRocket::ApplyAuthoritativeLaunch(const Fmatrix& xform, const Fvector& vel, bool has_velocity)
+{
+	VERIFY2(_valid(xform), "ApplyAuthoritativeLaunch. Invalid xform argument!");
+	const Fvector launch_vel = (has_velocity && _valid(vel)) ? vel : zero_vel;
+	SetLaunchParams(xform, launch_vel, zero_vel);
+	m_bLaunched = true;
+
+	CPhysicsShell* shell = m_pPhysicsShell;
+	if (!shell)
+	{
+		setup_physic_shell();
+		shell = m_pPhysicsShell;
+	}
+	if (shell)
+	{
+		shell->Enable();
+		shell->EnableCollision();
+		shell->set_ApplyByGravity(TRUE);
+		shell->SetAirResistance(0.f, 0.f);
+		shell->set_DynamicScales(1.f, 1.f);
+		shell->SetTransform(xform, mh_unspecified);
+		if (!shell->isActive())
+		{
+			if (has_velocity)
+				shell->Activate(xform, launch_vel, zero_vel);
+			else
+				shell->Activate(xform, false);
+		}
+		if (has_velocity)
+			shell->set_LinearVel(launch_vel);
+
+		shell->set_PhysicsRefObject(this);
+		shell->set_ObjectContactCallback(ObjectContactCallback);
+		shell->set_ContactCallback(NULL);
+		shell->SetAllGeomTraced();
+	}
+
+	XFORM().set(xform);
+	Position().set(xform.c);
+	setVisible(TRUE);
+	setEnabled(TRUE);
+	processing_activate();
+
+	if (!H_Parent() && m_eState == eInactive)
+	{
+		StartFlying();
+		StartEngine();
+	}
+}
 void CCustomRocket::activate_physic_shell()
 {
 	R_ASSERT(H_Parent());
@@ -231,15 +280,15 @@ void CCustomRocket::ObjectContactCallback(bool& do_colide, bool bo1, dContact& c
 	if (!l_pOwner || l_pOwner == (CGameObject*)l_this) l_pOwner = l_pUD2
 		                                                              ? smart_cast<CGameObject*>(l_pUD2->ph_ref_object)
 		                                                              : NULL;
-	if (!l_pOwner || l_pOwner != l_this->m_pOwner)
+	if (!l_this->m_pOwner || !l_pOwner || l_pOwner != l_this->m_pOwner)
 	{
-		if (l_this->m_pOwner)
-		{
 			Fvector l_pos;
-			l_pos.set(l_this->Position());
+			l_pos.set(cast_fv(c.geom.pos));
+			if (!_valid(l_pos))
+				l_pos.set(l_this->Position());
 			dxGeomUserData* l_pMYU = bo1 ? l_pUD1 : l_pUD2;
 			VERIFY(l_pMYU);
-			if (l_pMYU->last_pos[0] != -dInfinity)
+			if (!_valid(l_pos) && l_pMYU->last_pos[0] != -dInfinity)
 				l_pos = cast_fv(l_pMYU->last_pos);
 #ifdef DEBUG
 			bool corrected_pos=false;
@@ -291,7 +340,6 @@ void CCustomRocket::ObjectContactCallback(bool& do_colide, bool bo1, dContact& c
 			l_this->m_pPhysicsShell->setTorque(Fvector().set(0, 0, 0));
 			l_this->m_pPhysicsShell->set_ApplyByGravity(false);
 			l_this->setEnabled(FALSE);
-		}
 	}
 	else
 	{
@@ -430,7 +478,47 @@ void CCustomRocket::UpdateCL()
 	{
 		if (m_time_to_explode < Device.fTimeGlobal)
 		{
-			Contact(Position(), Direction());
+			Fvector explode_pos = Position();
+			Fvector explode_dir = Direction();
+			if (m_pPhysicsShell)
+			{
+				Fmatrix shell_xform;
+				m_pPhysicsShell->GetGlobalTransformDynamic(&shell_xform);
+				if (_valid(shell_xform))
+				{
+					explode_pos.set(shell_xform.c);
+					explode_dir.set(shell_xform.k);
+				}
+			}
+			// Dedicated-single fallback: when timeout fires but pose is still near launch,
+			// approximate impact point from launch velocity to avoid muzzle-position explosion.
+			const bool launch_valid = _valid(m_LaunchXForm) && _valid(m_vLaunchVelocity) &&
+				m_vLaunchVelocity.square_magnitude() > EPS;
+			const bool explode_near_launch = launch_valid &&
+				(explode_pos.distance_to_sqr(m_LaunchXForm.c) < (0.35f * 0.35f));
+			if (explode_near_launch)
+			{
+				const float explode_time_sec =
+					READ_IF_EXISTS(pSettings, r_float, cNameSect(), "force_explode_time", 0.f) / 1000.0f;
+				if (explode_time_sec > EPS)
+				{
+					Fvector ballistic_pos = m_LaunchXForm.c;
+					ballistic_pos.mad(m_vLaunchVelocity, explode_time_sec);
+					ballistic_pos.y -= 0.5f * EffectiveGravity() * explode_time_sec * explode_time_sec;
+					if (_valid(ballistic_pos))
+						explode_pos.set(ballistic_pos);
+
+					Fvector launch_dir = m_vLaunchVelocity;
+					launch_dir.normalize_safe();
+					if (_valid(launch_dir) && launch_dir.square_magnitude() > EPS)
+						explode_dir.set(launch_dir);
+				}
+			}
+			if (!_valid(explode_pos))
+				explode_pos.set(Position());
+			if (!_valid(explode_dir) || fis_zero(explode_dir.square_magnitude()))
+				explode_dir.set(Direction());
+			Contact(explode_pos, explode_dir);
 			//			Msg("--contact");
 		}
 	}
@@ -657,9 +745,25 @@ void CCustomRocket::OnEvent(NET_Packet& P, u16 type)
 	{
 	case GE_GRENADE_EXPLODE:
 		{
-			if (m_eState != eCollide && OnClient())
+			if (m_eState != eCollide)
 			{
-				CCustomRocket::Contact(Position(), Direction());
+				Fvector explode_pos = Position();
+				Fvector explode_normal = Direction();
+				const u32 saved_pos = P.r_tell();
+				const u32 unread = (P.B.count > P.r_tell()) ? (P.B.count - P.r_tell()) : 0;
+				bool has_payload = false;
+				if (unread >= (sizeof(u16) + sizeof(Fvector) + sizeof(Fvector)))
+				{
+					u16 ignored_initiator = u16(-1);
+					P.r_u16(ignored_initiator);
+					P.r_vec3(explode_pos);
+					P.r_vec3(explode_normal);
+					has_payload = _valid(explode_pos) && _valid(explode_normal);
+				}
+				P.r_pos = saved_pos;
+				if (!has_payload || !_valid(explode_normal) || fis_zero(explode_normal.square_magnitude()))
+					explode_normal = Direction();
+				CCustomRocket::Contact(explode_pos, explode_normal);
 			};
 		}
 		break;

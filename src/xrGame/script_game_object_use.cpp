@@ -161,12 +161,42 @@ ALife::ERelationType CScriptGameObject::GetRelationType(CScriptGameObject* who)
 		return ALife::eRelationTypeDummy;
 	}
 
-	CEntityAlive* l_tpEntityAlive2 = smart_cast<CEntityAlive*>(&who->object());
+	if (!who)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                "%s cannot apply GetRelationType method for nil object!",
+		                                *object().cName());
+		return ALife::eRelationTypeDummy;
+	}
+
+	CEntityAlive* l_tpEntityAlive2 = nullptr;
+	LPCSTR who_name = "<destroyed>";
+	bool who_valid = false;
+	__try
+	{
+		CGameObject& who_object = who->object();
+		l_tpEntityAlive2 = smart_cast<CEntityAlive*>(&who_object);
+		who_name = *who_object.cName();
+		who_valid = true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		who_valid = false;
+	}
+
+	if (!who_valid)
+	{
+		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
+		                                "%s cannot apply GetRelationType method for destroyed object!",
+		                                *object().cName());
+		return ALife::eRelationTypeDummy;
+	}
+
 	if (!l_tpEntityAlive2)
 	{
 		ai().script_engine().script_log(ScriptStorage::eLuaMessageTypeError,
 		                                "%s cannot apply GetRelationType method for non-alive object!",
-		                                *who->object().cName());
+		                                who_name);
 		return ALife::eRelationTypeDummy;
 	}
 

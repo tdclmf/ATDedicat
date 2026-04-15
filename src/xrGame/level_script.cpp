@@ -1781,7 +1781,22 @@ void g_send(NET_Packet& P, bool bReliable = 0, bool bSequential = 1, bool bHighP
 //can spawn entities like bolts, phantoms, ammo, etc. which normally crash when using alife():create()
 void spawn_section(LPCSTR sSection, Fvector3 vPosition, u32 LevelVertexID, u16 ParentID, bool bReturnItem = false)
 {
-	Level().spawn_item(sSection, vPosition, LevelVertexID, ParentID, bReturnItem);
+	u16 resolved_parent_id = ParentID;
+	if (ParentID != u16(-1) &&
+		OnClient() &&
+		!g_dedicated_server &&
+		Game().Type() == eGameIDSingle)
+	{
+		CObject* parent_object = Level().Objects.net_Find(ParentID);
+		if (!parent_object || parent_object->getDestroy())
+		{
+			game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+			if (game_cl && game_cl->local_player && game_cl->local_player->GameID != u16(-1))
+				resolved_parent_id = game_cl->local_player->GameID;
+		}
+	}
+
+	Level().spawn_item(sSection, vPosition, LevelVertexID, resolved_parent_id, bReturnItem);
 }
 
 enum ETraceTarget {

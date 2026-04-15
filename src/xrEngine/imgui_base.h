@@ -87,6 +87,8 @@ namespace xr_imgui
         bool m_shown;
         bool m_input;
         bool firstframe;
+        bool m_io_paths_allocated;
+        bool m_runtime_registered;
         UINT32 keyboard_code_page;
         xr_vector<IReader*> ImGuiFontsPtr;
         xr_map<shared_str, ImFont*> ImFonts;

@@ -63,42 +63,68 @@ void CRocketLauncher::AttachRocket(u16 rocket_id, CGameObject* parent_rocket_lau
 void CRocketLauncher::DetachRocket(u16 rocket_id, bool bLaunch)
 {
 	CCustomRocket* pRocket = smart_cast<CCustomRocket*>(Level().Objects.net_Find(rocket_id));
-	if (!pRocket && OnClient()) return;
+	if (!pRocket)
+	{
+		if (OnClient())
+			return;
 
-	VERIFY(pRocket);
+		VERIFY(pRocket);
+		return;
+	}
+
 	ROCKETIT It = std::find(m_rockets.begin(), m_rockets.end(), pRocket);
 	ROCKETIT It_l = std::find(m_launched_rockets.begin(), m_launched_rockets.end(), pRocket);
 
-	if (OnServer())
+	const bool tracked = (It != m_rockets.end()) || (It_l != m_launched_rockets.end());
+	if (!tracked)
 	{
-		VERIFY((It != m_rockets.end())||
-			(It_l != m_launched_rockets.end()));
-	};
+		// Idempotent detach for dedicated launch path: packet may be replayed after local detach.
+		pRocket->m_bLaunched = bLaunch;
+		if (pRocket->H_Parent())
+			pRocket->H_SetParent(NULL);
+		if (bLaunch)
+		{
+			pRocket->setVisible(TRUE);
+			pRocket->processing_activate();
+		}
+		return;
+	}
 
+	bool detached = false;
 	if (It != m_rockets.end())
 	{
 		(*It)->m_bLaunched = bLaunch;
 		(*It)->H_SetParent(NULL);
 		m_rockets.erase(It);
-	};
+		detached = true;
+	}
 
 	if (It_l != m_launched_rockets.end())
 	{
-		(*It)->m_bLaunched = bLaunch;
+		(*It_l)->m_bLaunched = bLaunch;
 		(*It_l)->H_SetParent(NULL);
 		m_launched_rockets.erase(It_l);
+		detached = true;
+	}
+
+	if (detached && bLaunch)
+	{
+		pRocket->setVisible(TRUE);
+		pRocket->processing_activate();
 	}
 }
-
-
 void CRocketLauncher::LaunchRocket(const Fmatrix& xform,
                                    const Fvector& vel,
                                    const Fvector& angular_vel)
 {
 	VERIFY2(_valid(xform), "CRocketLauncher::LaunchRocket. Invalid xform argument!");
-	getCurrentRocket()->SetLaunchParams(xform, vel, angular_vel);
+	CCustomRocket* current_rocket = getCurrentRocket();
+	VERIFY(current_rocket);
+	current_rocket->SetLaunchParams(xform, vel, angular_vel);
+	// Keep pre-detach collisions muted; launch flag is finalized in DetachRocket(..., bLaunch=true).
+	current_rocket->m_bLaunched = false;
 
-	m_launched_rockets.push_back(getCurrentRocket());
+	m_launched_rockets.push_back(current_rocket);
 }
 
 CCustomRocket* CRocketLauncher::getCurrentRocket()

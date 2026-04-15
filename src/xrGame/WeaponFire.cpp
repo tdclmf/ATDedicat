@@ -15,6 +15,7 @@
 
 #include "game_cl_mp.h"
 #include "../Layers/xrRender/xrRender_console.h"
+#include "weapon_trace.h"
 
 #define FLAME_TIME 0.05f
 
@@ -129,9 +130,19 @@ void CWeapon::FireTrace(const Fvector& P, const Fvector& D)
 	g_pGamePersistent->GrassBendersAddShot(cast_game_object()->ID(), ShotPos, D, 3.0f, 20.0f, ps_ssfx_int_grass_params_2.z, ps_ssfx_int_grass_params_2.w);
 
 	// Ammo
-	m_lastCartridge = l_cartridge;
-	m_magazine.pop_back();
-	--iAmmoElapsed;
+    const int ammo_before = iAmmoElapsed;
+    m_lastCartridge = l_cartridge;
+    m_magazine.pop_back();
+    --iAmmoElapsed;
+    CActor* actor_owner = smart_cast<CActor*>(H_Parent());
+    if (OnClient() && actor_owner && actor_owner->Local())
+    {
+        WPN_TRACE("Weapon::FireTrace local ammo consume weapon=%s before=%d after=%d send_hit=%d",
+            cName().c_str(),
+            ammo_before,
+            iAmmoElapsed,
+            SendHit ? 1 : 0);
+    }
 
 	VERIFY((u32)iAmmoElapsed == m_magazine.size());
 }

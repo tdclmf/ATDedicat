@@ -248,6 +248,11 @@ protected:
 	s32 m_ZoomRndSeed;
 	//random seed для Weapon Effector Shot
 	s32 m_ShotRndSeed;
+	// Dedicated-drop hint sent from controlling client with GE_INV_ACTION(kDROP).
+	bool m_drop_hint_valid;
+	Fvector m_drop_hint_position;
+	Fvector m_drop_hint_direction;
+	u32 m_drop_hint_time;
 
 	bool m_bOutBorder;
 	//сохраняет счетчик объектов в feel_touch, для которых необходимо обновлять размер колижена с актером 
@@ -261,6 +266,9 @@ public:
 	s32 GetZoomRndSeed() { return m_ZoomRndSeed; };
 	void SetShotRndSeed(s32 Seed = 0);
 	s32 GetShotRndSeed() { return m_ShotRndSeed; };
+	void SetDropHint(const Fvector& position, const Fvector& direction, u32 timestamp = 0);
+	bool GetDropHint(Fvector& position, Fvector& direction, u32 max_age_ms = 750) const;
+	void InvalidateDropHint();
 
 public:
 	void detach_Vehicle();

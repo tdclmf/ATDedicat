@@ -1,4 +1,4 @@
-﻿#include "pch_script.h"
+#include "pch_script.h"
 #include "Actor_Flags.h"
 #include "hudmanager.h"
 #ifdef DEBUG
@@ -43,6 +43,7 @@
 #include "game_cl_base.h"
 #include "game_cl_single.h"
 #include "xrmessages.h"
+#include "weapon_trace.h"
 #include "string_table.h"
 #include "usablescriptobject.h"
 #include "../xrEngine/cl_intersect.h"
@@ -98,6 +99,31 @@ extern float cammera_into_collision_shift;
 string32 ACTOR_DEFS::g_quick_use_slots[4] = {NULL, NULL, NULL, NULL};
 //skeleton
 
+namespace
+{
+bool IsMPActorSectionName(const CGameObject* object)
+{
+	return object && (xr_strcmp(object->cNameSect().c_str(), "mp_actor") == 0);
+}
+
+bool IsMPActor(const CInventoryOwner* owner)
+{
+	const CGameObject* game_object = smart_cast<const CGameObject*>(owner);
+	return IsMPActorSectionName(game_object);
+}
+
+bool IsMPActor(const CActor* actor)
+{
+	const CGameObject* game_object = smart_cast<const CGameObject*>(actor);
+	return IsMPActorSectionName(game_object);
+}
+
+bool IsMPActorTalkBlocked(const CActor* actor, const CInventoryOwner* partner)
+{
+	return IsMPActor(actor) && IsMPActor(partner);
+}
+}
+
 
 static Fbox bbStandBox;
 static Fbox bbCrouchBox;
@@ -145,7 +171,7 @@ CActor::CActor() : CEntityAlive(), current_ik_cam_shift(0)
 	fCurAVelocity = 0.0f;
 	fFPCamYawMagnitude = 0.0f; //--#SM+#--
 	fFPCamPitchMagnitude = 0.0f; //--#SM+#--
-	// ýôôåêòîðû
+	// yooaeoi?u
 	pCamBobbing = 0;
 
 	cam_freelook = eflDisabled;
@@ -161,6 +187,12 @@ CActor::CActor() : CEntityAlive(), current_ik_cam_shift(0)
 
 	b_DropActivated = 0;
 	f_DropPower = 0.f;
+	m_ZoomRndSeed = 0;
+	m_ShotRndSeed = 0;
+	m_drop_hint_valid = false;
+	m_drop_hint_position.set(0.f, 0.f, 0.f);
+	m_drop_hint_direction.set(0.f, 0.f, 1.f);
+	m_drop_hint_time = 0;
 
 	m_fRunFactor = 2.f;
 	m_fCrouchFactor = 0.2f;
@@ -183,7 +215,7 @@ CActor::CActor() : CEntityAlive(), current_ik_cam_shift(0)
     Device.seqRender.Add	(this,REG_PRIORITY_LOW);
 #endif
 
-	//ðàçðåøèòü èñïîëüçîâàíèå ïîÿñà â inventory
+	//?ac?aoeou eniieuciaaiea iiyna a inventory
 	inventory().SetBeltUseful(true);
 
 	m_pPersonWeLookingAt = NULL;
@@ -297,6 +329,7 @@ void CActor::reinit()
 
 	set_input_external_handler(0);
 	m_time_lock_accel = 0;
+	InvalidateDropHint();
 }
 
 void CActor::reload(LPCSTR section)
@@ -485,7 +518,7 @@ void CActor::Load(LPCSTR section)
 	// sheduler
 	shedule.t_min = shedule.t_max = 1;
 
-	// íàñòðîéêè äèñïåðñèè ñòðåëüáû
+	// iano?ieee aenia?nee no?aeuau
 	m_fDispBase = pSettings->r_float(section, "disp_base");
 	m_fDispBase = deg2rad(m_fDispBase);
 
@@ -572,12 +605,12 @@ void CActor::Hit(SHit* pHDS)
 			if (Device.dwFrame != last_hit_frame &&
 				HDS.bone() != BI_NONE)
 			{
-				// âû÷èñëèòü ïîçèöèþ è íàïðàâëåííîñòü ïàðòèêëà
+				// au?eneeou iiceoe? e iai?aaeaiiinou ia?oeeea
 				Fmatrix pos;
 
 				CParticlesPlayer::MakeXFORM(this, HDS.bone(), HDS.dir, HDS.p_in_bone_space, pos);
 
-				// óñòàíîâèòü particles
+				// onoaiiaeou particles
 				CParticlesObject* ps = NULL;
 
 				if (eacFirstEye == cam_active && this == Level().CurrentEntity())
@@ -817,7 +850,7 @@ void CActor::Die(CObject* who)
 		};
 
 
-		///!!! ÷èñòêà ïîÿñà
+		///!!! ?enoea iiyna
 		TIItemContainer& l_blist = inventory().m_belt;
 		while (!l_blist.empty())
 			inventory().Ruck(l_blist.front());
@@ -981,6 +1014,7 @@ void CActor::UpdateCL()
 		return;
 	u32 DT = Device.dwTimeDelta;
 	setSVU(OnServer());
+
 	//.	UpdateInventoryOwner			(DT);
 
 	if (IsFocused())
@@ -1135,7 +1169,7 @@ void CActor::UpdateCL()
 		if (precise_catspaw_dotmarks)
 			inherited::shedule_Update(DT);
 
-		//ýôôåêòîð âêëþ÷àåìûé ïðè õîäüáå
+		//yooaeoi? aee??aaiue i?e oiauaa
 		if (!pCamBobbing)
 		{
 			pCamBobbing = xr_new<CEffectorBobbing>();
@@ -1143,7 +1177,7 @@ void CActor::UpdateCL()
 		}
 		pCamBobbing->SetState(mstate_real, conditions().IsLimping(), IsZoomAimingMode());
 
-		//çâóê òÿæåëîãî äûõàíèÿ ïðè óòàëîñòè è õðîìàíèè
+		//caoe oy?aeiai auoaiey i?e ooaeinoe e o?iiaiee
 		if (this == Level().CurrentControlEntity() && !g_dedicated_server)
 		{
 			if (conditions().IsLimping() && g_Alive() && !psActorFlags.test(AF_GODMODE_RT))
@@ -1211,7 +1245,7 @@ void CActor::UpdateCL()
 				m_DangerSnd.stop();
 		}
 
-		//÷òî àêòåð âèäèò ïåðåä ñîáîé
+		//?oi aeoa? aeaeo ia?aa niaie
 		collide::rq_result& RQ = HUD().GetRQ();
 
 		if (!input_external_handler_installed() && RQ.O && RQ.O->getVisible() && RQ.range < 2.0f)
@@ -1233,7 +1267,10 @@ void CActor::UpdateCL()
 			{
 				if (m_pPersonWeLookingAt && pEntityAlive->g_Alive() && m_pPersonWeLookingAt->IsTalkEnabled())
 				{
-					m_sDefaultObjAction = m_sCharacterUseAction;
+					if (IsMPActorTalkBlocked(this, m_pPersonWeLookingAt))
+						m_sDefaultObjAction = NULL;
+					else
+						m_sDefaultObjAction = m_sCharacterUseAction;
 				}
 				else if (pEntityAlive && !pEntityAlive->g_Alive())
 				{
@@ -1275,7 +1312,7 @@ void CActor::UpdateCL()
 
 		//	UpdateSleep									();
 
-		//äëÿ ñâîéñò àðòåôàêòîâ, íàõîäÿùèõñÿ íà ïîÿñå
+		//aey naieno a?oaoaeoia, iaoiayueony ia iiyna
 		UpdateArtefactsOnBeltAndOutfit();
 		m_pPhysics_support->in_shedule_Update(DT);
 
@@ -1547,6 +1584,16 @@ void CActor::shedule_Update(u32 DT)
 {
 	if (!precise_catspaw_dotmarks)
 		inherited::shedule_Update(DT);
+
+	if (g_dedicated_server)
+	{
+		if (inventory().GetActiveSlot() != inventory().GetNextActiveSlot())
+		{
+			WPN_TRACE("Actor::shedule_Update dedicated inventory tick actor=%u active=%u next=%u", ID(),
+				inventory().GetActiveSlot(), inventory().GetNextActiveSlot());
+		}
+		UpdateInventoryOwner(DT);
+	}
 };
 
 void CActor::set_safemode(bool status)
@@ -2271,6 +2318,46 @@ void CActor::SetShotRndSeed(s32 Seed)
 	else m_ShotRndSeed = s32(Level().timeServer_Async());
 };
 
+void CActor::SetDropHint(const Fvector& position, const Fvector& direction, u32 timestamp)
+{
+	m_drop_hint_position = position;
+	m_drop_hint_direction = direction;
+	if (!_valid(m_drop_hint_position))
+		m_drop_hint_position.set(0.f, 0.f, 0.f);
+	if (!_valid(m_drop_hint_direction) || m_drop_hint_direction.square_magnitude() < EPS)
+		m_drop_hint_direction.set(0.f, 0.f, 1.f);
+	else
+		m_drop_hint_direction.normalize();
+	m_drop_hint_time = (timestamp != 0) ? timestamp : Level().timeServer_Async();
+	m_drop_hint_valid = true;
+}
+
+bool CActor::GetDropHint(Fvector& position, Fvector& direction, u32 max_age_ms) const
+{
+	if (!m_drop_hint_valid)
+		return false;
+
+	const u32 now = Level().timeServer_Async();
+	const u32 age = now - m_drop_hint_time;
+	if (max_age_ms && age > max_age_ms)
+		return false;
+
+	position = m_drop_hint_position;
+	direction = m_drop_hint_direction;
+	if (!_valid(position) || !_valid(direction) || direction.square_magnitude() < EPS)
+		return false;
+
+	direction.normalize();
+	return true;
+}
+
+void CActor::InvalidateDropHint()
+{
+	m_drop_hint_valid = false;
+	m_drop_hint_position.set(0.f, 0.f, 0.f);
+	m_drop_hint_direction.set(0.f, 0.f, 1.f);
+	m_drop_hint_time = 0;
+}
 Fvector CActor::GetMissileOffset() const
 {
 	return m_vMissileOffset;
@@ -2331,12 +2418,12 @@ bool CActor::can_attach(const CInventoryItem* inventory_item) const
 	if (!item || /*!item->enabled() ||*/ !item->can_be_attached())
 		return (false);
 
-	//ìîæíî ëè ïðèñîåäèíÿòü îáúåêòû òàêîãî òèïà
+	//ii?ii ee i?eniaaeiyou iauaeou oaeiai oeia
 	if (m_attach_item_sections.end() == std::find(m_attach_item_sections.begin(), m_attach_item_sections.end(),
 	                                              inventory_item->object().cNameSect()))
 		return false;
 
-	//åñëè óæå åñòü ïðèñîåäèííåíûé îáúåò òàêîãî òèïà 
+	//anee o?a anou i?eniaaeiiaiue iauao oaeiai oeia 
 	if (attached(inventory_item->object().cNameSect()))
 		return false;
 

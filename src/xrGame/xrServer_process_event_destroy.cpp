@@ -40,10 +40,38 @@ bool xrServer::Process_event_destroy(NET_Packet& P, ClientID sender, u32 time, u
 	};
 
 	R_ASSERT(e_dest);
-	xrClientData* c_dest = e_dest->owner; // клиент, чей юнит
-	R_ASSERT(c_dest);
-	xrClientData* c_from = ID_to_client(sender); // клиент, кто прислал
-	R_ASSERT(c_dest == c_from); // assure client ownership of event
+	xrClientData* c_dest = e_dest->owner; // client that owns the entity
+	xrClientData* c_from = ID_to_client(sender); // client that sent event
+
+	// Ownership check is valid only for external destroy events.
+	// Recursive child-destroy path (pEPack != nullptr) is server-side cleanup.
+	if (nullptr == pEPack)
+	{
+		const bool ownership_match = (c_dest && c_from && c_dest == c_from);
+		if (!ownership_match)
+		{
+			const bool allow_server_cleanup =
+				(c_from == nullptr) ||
+				(SV_Client && sender == SV_Client->ID) ||
+				(game && game->Type() == eGameIDSingle);
+
+			if (!allow_server_cleanup)
+			{
+				Msg("! SV:ge_destroy reject ownership mismatch: dest=%s sender=0x%08x owner=%s sender_client=%s",
+					ent_name_safe(id_dest).c_str(),
+					sender.value(),
+					c_dest ? c_dest->name.c_str() : "<none>",
+					c_from ? c_from->name.c_str() : "<none>");
+				return true;
+			}
+
+			Msg("! SV:ge_destroy ownership mismatch accepted for cleanup: dest=%s sender=0x%08x owner=%s sender_client=%s",
+				ent_name_safe(id_dest).c_str(),
+				sender.value(),
+				c_dest ? c_dest->name.c_str() : "<none>",
+				c_from ? c_from->name.c_str() : "<none>");
+		}
+	}
 	u16 parent_id = e_dest->ID_Parent;
 
 #ifdef MP_LOGGING

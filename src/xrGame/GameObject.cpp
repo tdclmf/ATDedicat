@@ -32,6 +32,7 @@
 #include "../xrengine/xr_collide_form.h"
 #include "script_attachment_manager.h"
 #include "player_hud.h"
+#include "weapon_trace.h"
 extern MagicBox3 MagicMinBox(int iQuantity, const Fvector* akPoint);
 
 #pragma warning(push)
@@ -956,8 +957,62 @@ void CGameObject::u_EventGen(NET_Packet& P, u32 type, u32 dest)
 	P.w_u16(u16(dest & 0xffff));
 }
 
+namespace
+{
+bool IsWeaponTraceEventTypeForSend(u16 type)
+{
+	switch (type)
+	{
+	case GE_INV_ACTION:
+	case GE_WPN_STATE_CHANGE:
+	case GE_WPN_AMMO_SYNC:
+	case GEG_PLAYER_ITEM2SLOT:
+	case GEG_PLAYER_ITEM2RUCK:
+	case GEG_PLAYER_ITEM2BELT:
+	case GEG_PLAYER_ACTIVATE_SLOT:
+	case GEG_PLAYER_DISABLE_SPRINT:
+	case GEG_PLAYER_WEAPON_HIDE_STATE:
+	case GEG_PLAYER_ITEM_EAT:
+		return true;
+	default:
+		return false;
+	}
+}
+}
+
 void CGameObject::u_EventSend(NET_Packet& P, u32 dwFlags)
 {
+	if (g_wpn_trace)
+	{
+		NET_Packet dbg = P;
+		if (dbg.B.count >= 10)
+		{
+			u16 msg_type = 0;
+			dbg.r_begin(msg_type);
+			if (msg_type == M_EVENT)
+			{
+				const u32 timestamp = dbg.r_u32();
+				const u16 event_type = dbg.r_u16();
+				const u16 event_dest = dbg.r_u16();
+
+				if (IsWeaponTraceEventTypeForSend(event_type))
+				{
+					WPN_TRACE("GameObject::u_EventSend obj=%u event=%u dest=%u ts=%u flags=0x%08x",
+						event_dest, event_type, event_dest, timestamp, dwFlags);
+
+					if (event_type == GE_INV_ACTION && (dbg.r_tell() + sizeof(u16)) <= dbg.B.count)
+					{
+						const u16 action = dbg.r_u16();
+						u32 action_flags = 0;
+						if ((dbg.r_tell() + sizeof(u32)) <= dbg.B.count)
+							action_flags = dbg.r_u32();
+						WPN_TRACE("GameObject::u_EventSend GE_INV_ACTION obj=%u cmd=%u(%s) cmd_flags=0x%08x",
+							event_dest, action, id_to_action_name((EGameActions)action), action_flags);
+					}
+				}
+			}
+		}
+	}
 	Level().Send(P, dwFlags);
 }
 

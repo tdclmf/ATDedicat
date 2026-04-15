@@ -29,6 +29,7 @@
 #include "WeaponMagazined.h"
 #include "WeaponKnife.h"
 #include "CustomOutfit.h"
+#include "actor_mp_client.h"
 
 #include "actor_anim_defs.h"
 
@@ -55,8 +56,45 @@ int g_cl_InterpolationType = 0;
 u32 g_cl_InterpolationMaxPoints = 0;
 int g_dwInputUpdateDelta = 20;
 BOOL net_cl_inputguaranteed = FALSE;
+static CActor* g_actor = NULL;
+extern bool g_dedicated_single_import_from_cl_update;
 
-IC CActor* Actor() { return g_pGameLevel ? smart_cast<CActor*>(Level().CurrentEntity()) : NULL; }
+IC CActor* Actor()
+{
+	// Prefer runtime control/view entities; fallback to cached single-player actor pointer.
+	// This avoids stale g_actor usage during teardown.
+	if (g_pGameLevel)
+	{
+		CActor* actor = smart_cast<CActor*>(Level().CurrentEntity());
+		if (!actor)
+			actor = smart_cast<CActor*>(Level().CurrentControlEntity());
+		if (actor)
+			return actor;
+	}
+
+	return g_actor;
+}
+
+static void SendDedicatedSingleLocalActorVisual(CActor* actor, LPCSTR reason)
+{
+	if (!actor)
+		return;
+
+	if (g_dedicated_server || OnClient() || Game().Type() != eGameIDSingle || !actor->Local())
+		return;
+
+	const shared_str visual_name = actor->cNameVisual();
+	if (!visual_name.size())
+		return;
+
+	NET_Packet P;
+	actor->u_EventGen(P, GE_CHANGE_VISUAL, actor->ID());
+	P.w_stringZ(visual_name.c_str());
+	actor->u_EventSend(P);
+
+	Msg("--- [CL] Dedicated single bridge: sent local actor visual [%s] (%s).",
+		visual_name.c_str(), reason ? reason : "unknown");
+}
 
 //--------------------------------------------------------------------
 void CActor::ConvState(u32 mstate_rl, string128* buf)
@@ -87,10 +125,32 @@ void CActor::net_Export(NET_Packet& P) // export to server
 	Fvector p = Position();
 	P.w_vec3(p); //Position());
 
-	P.w_float /*w_angle8*/(angle_normalize(r_model_yaw)); //Device.vCameraDirection.getH());//
-	P.w_float /*w_angle8*/(angle_normalize(unaffected_r_torso.yaw)); //(r_torso.yaw);
-	P.w_float /*w_angle8*/(angle_normalize(unaffected_r_torso.pitch)); //(r_torso.pitch);
-	P.w_float /*w_angle8*/(angle_normalize(unaffected_r_torso.roll)); //(r_torso.roll);
+	float model_yaw_to_send = angle_normalize(r_model_yaw);
+	float torso_yaw_to_send = angle_normalize(unaffected_r_torso.yaw);
+	float torso_pitch_to_send = angle_normalize(unaffected_r_torso.pitch);
+	float torso_roll_to_send = angle_normalize(unaffected_r_torso.roll);
+	float camera_yaw_dbg = torso_yaw_to_send;
+	float camera_pitch_dbg = torso_pitch_to_send;
+
+	if (OnClient() && !g_dedicated_server && Game().Type() == eGameIDSingle && Local())
+	{
+		if (cam_Active())
+		{
+			camera_yaw_dbg = angle_normalize(cam_Active()->GetWorldYaw());
+			camera_pitch_dbg = angle_normalize(cam_Active()->GetWorldPitch());
+			torso_yaw_to_send = camera_yaw_dbg;
+			torso_pitch_to_send = camera_pitch_dbg;
+		}
+
+		// Dedicated-single bridge:
+		// send live camera/torso yaw as model yaw so remote peers receive turning.
+		model_yaw_to_send = torso_yaw_to_send;
+	}
+
+	P.w_float /*w_angle8*/(model_yaw_to_send); //Device.vCameraDirection.getH());//
+	P.w_float /*w_angle8*/(torso_yaw_to_send); //(r_torso.yaw);
+	P.w_float /*w_angle8*/(torso_pitch_to_send); //(r_torso.pitch);
+	P.w_float /*w_angle8*/(torso_roll_to_send); //(r_torso.roll);
 	P.w_u8(u8(g_Team()));
 	P.w_u8(u8(g_Squad()));
 	P.w_u8(u8(g_Group()));
@@ -363,16 +423,57 @@ void CActor::net_Import_Base(NET_Packet& P)
 	u8 ActiveSlot;
 	P.r_u8(ActiveSlot);
 
+	// Dedicated-single bridge:
+	// Remote actors receive both relayed M_CL_UPDATE and generic M_UPDATE_OBJECTS.
+	// M_UPDATE_OBJECTS can carry stale slot/state and causes visible hold/holster flicker.
+	// Ignore remote actor base data from non M_CL_UPDATE source as early as possible.
+	const bool ignore_remote_base_from_non_cl_update =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		!Local() &&
+		!g_dedicated_single_import_from_cl_update;
+
+	const bool dedicated_single_local_actor_import =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		Local();
+
 	//----------- for E3 -----------------------------
 	if (OnClient())
 		//------------------------------------------------
 	{
-		if (ActiveSlot == NO_ACTIVE_SLOT) inventory().SetActiveSlot(NO_ACTIVE_SLOT);
-		else
+		// MP/bridge clients must not call Inventory::Activate() here:
+		// on client it early-outs and active item never appears in hands.
+		// Keep slot state in sync directly, like CActorMP import path does.
+		// But do not consume stale generic M_UPDATE slot data for remote actors.
+		if (!ignore_remote_base_from_non_cl_update && !dedicated_single_local_actor_import)
 		{
-			if (inventory().GetActiveSlot() != u16(ActiveSlot))
-				inventory().Activate(ActiveSlot);
-		};
+			const u16 new_active_slot = (ActiveSlot == NO_ACTIVE_SLOT) ? NO_ACTIVE_SLOT : u16(ActiveSlot);
+			if (inventory().GetActiveSlot() != new_active_slot)
+				inventory().SetActiveSlot(new_active_slot);
+		}
+	}
+
+	// Dedicated-single bridge:
+	// M_UPDATE_OBJECTS may also contain stale yaw and causes visible orientation flicker.
+	// Keep only relayed M_CL_UPDATE as source for remote actor interpolation/state.
+	if (ignore_remote_base_from_non_cl_update)
+		return;
+
+	// Dedicated-single bridge:
+	// In this mode physics correction path may lag behind net base updates.
+	// Apply latest remote actor orientation/state immediately from base packet.
+	if (OnClient() && !Local())
+	{
+		NET_Last = N;
+		r_model_yaw = angle_normalize(N.o_model);
+		r_model_yaw_dest = r_model_yaw;
+		r_model_yaw_delta = 0.0f;
+		unaffected_r_torso = N.o_torso;
+		r_torso = unaffected_r_torso;
+		mstate_wishful = mstate_real = N.mstate;
 	}
 
 	//----------- for E3 -----------------------------
@@ -411,6 +512,13 @@ void CActor::net_Import_Base_proceed()
 void CActor::net_Import_Physic(NET_Packet& P)
 {
 	m_States.clear();
+	const bool ignore_remote_phys_from_non_cl_update =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		!Local() &&
+		!g_dedicated_single_import_from_cl_update;
+
 	if (m_u16NumBones != 1)
 	{
 		Fvector min, max;
@@ -439,6 +547,12 @@ void CActor::net_Import_Physic(NET_Packet& P)
 			//---------------------------------------
 			m_States.push_back(state);
 		};
+
+		if (ignore_remote_phys_from_non_cl_update)
+		{
+			m_States.clear();
+			return;
+		}
 	}
 	else
 	{
@@ -466,6 +580,10 @@ void CActor::net_Import_Physic(NET_Packet& P)
 
 		N_A.State.previous_position = N_A.State.position;
 		N_A.State.previous_quaternion = N_A.State.quaternion;
+
+		if (ignore_remote_phys_from_non_cl_update)
+			return;
+
 		//----------- for E3 -----------------------------
 		if (Local() && OnClient() || !g_Alive()) return;
 		//		if (g_Alive() && (Remote() || OnServer()))
@@ -570,10 +688,38 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 		return FALSE;
 	}
 
-	if (g_dedicated_server && Game().Type() == eGameIDSingle && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+	if (g_dedicated_server && Game().Type() == eGameIDSingle && E->ID == 0)
 	{
-		Msg("--- [SV] Dedicated single: CActor::net_Spawn skipped for non-player actor ID: %u", E->ID);
+		Msg("--- [SV] Dedicated single: CActor::net_Spawn skipped for system actor ID: %u", E->ID);
 		return FALSE;
+	}
+
+	// Dedicated-single bridge:
+	// remote player actors can occasionally arrive with LOCAL set on non-owning clients.
+	// Normalize flags so only owned actor remains LOCAL+ASPLAYER.
+	if (!g_dedicated_server && OnClient() && Game().Type() == eGameIDSingle)
+	{
+		game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+		LPCSTR local_name = (game_cl && game_cl->local_player) ? game_cl->local_player->getName() : nullptr;
+		const bool has_local_name = local_name && xr_strlen(local_name);
+		const bool name_match = has_local_name && (0 == xr_strcmp(E->name_replace(), local_name));
+
+		if (name_match)
+		{
+			if (!E->s_flags.is(M_SPAWN_OBJECT_LOCAL) || !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+			{
+				Msg("--- [CL] Dedicated single bridge: promote actor [%s][%u] to LOCAL+ASPLAYER by name match.",
+					E->name_replace(), E->ID);
+				E->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
+				E->s_flags.set(M_SPAWN_OBJECT_ASPLAYER, TRUE);
+			}
+		}
+		else if (E->s_flags.is(M_SPAWN_OBJECT_LOCAL) && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+		{
+			Msg("--- [CL] Dedicated single bridge: clear LOCAL for remote actor [%s][%u].",
+				E->name_replace(), E->ID);
+			E->s_flags.set(M_SPAWN_OBJECT_LOCAL, FALSE);
+		}
 	}
 
 	if (!g_dedicated_server && OnServer())
@@ -592,14 +738,48 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 	{
 		Msg("--- [CL] Possession SUCCESS for object ID: %u (self ID: %u, LOCAL=%d, ASPLAYER=%d)",
 			E->ID, ID(), E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER));
+		Level().SetControlEntity(this);
 		Level().SetEntity(this);
+		inventory().Items_SetCurrentEntityHud(true);
+		if (!getVisible())
+			setVisible(TRUE);
+		psHUD_Flags.set(HUD_DRAW, TRUE);
+		psHUD_Flags.set(HUD_WEAPON, TRUE);
+		psHUD_Flags.set(HUD_WEAPON_RT, TRUE);
+		psHUD_Flags.set(HUD_WEAPON_RT2, TRUE);
+
+		// Dedicated-single bridge: local player-state can arrive late and keep stale spectator/dead flags.
+		// Force it to the possessed actor id as soon as possession is confirmed.
+		if (Game().Type() == eGameIDSingle && E->ID != 0)
+		{
+			game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+			if (game_cl && game_cl->local_player)
+			{
+				game_cl->local_player->SetGameID(ID());
+				game_cl->local_player->resetFlag(
+					GAME_PLAYER_FLAG_SPECTATOR +
+					GAME_PLAYER_FLAG_VERY_VERY_DEAD +
+					GAME_PLAYER_FLAG_SKIP
+				);
+			}
+		}
 	}
-	else
-	{
-		Msg("--- [SV/CL] Possession SKIPPED (Dedicated or non-local actor). LOCAL=%d ASPLAYER=%d",
-			E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER));
-	}
-	setEnabled(E->s_flags.is(M_SPAWN_OBJECT_LOCAL) || g_dedicated_server);
+		else
+		{
+			Msg("--- [SV/CL] Possession SKIPPED (Dedicated or non-local actor). LOCAL=%d ASPLAYER=%d",
+				E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER));
+		}
+
+		// Keep single-player style actor binding for subsystems that rely on Actor().
+		// In dedicated-single bridge local playable actor can have non-zero id, so bind by flags.
+		// Dedicated server may spawn local actor mirrors without ASPLAYER flag: bind those too.
+		const bool should_bind_global_actor =
+			(E->s_flags.is(M_SPAWN_OBJECT_LOCAL) && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER)) ||
+			(g_dedicated_server && OnServer() && E->s_flags.is(M_SPAWN_OBJECT_LOCAL));
+		if (should_bind_global_actor)
+			g_actor = this;
+
+		setEnabled(E->s_flags.is(M_SPAWN_OBJECT_LOCAL) || g_dedicated_server);
 
 	VERIFY(m_pActorEffector == NULL);
 
@@ -615,8 +795,19 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 
 	game_news_registry->registry().init(ID());
 
-	if (!CInventoryOwner::net_Spawn(DC)) return FALSE;
-	if (!inherited::net_Spawn(DC)) return FALSE;
+	if (!CInventoryOwner::net_Spawn(DC))
+	{
+		Msg("! [NET] CActor::net_Spawn failed at CInventoryOwner::net_Spawn (ID=%u LOCAL=%d ASPLAYER=%d client=%d server=%d)",
+			E->ID, E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER), OnClient(), OnServer());
+		return FALSE;
+	}
+
+	if (!inherited::net_Spawn(DC))
+	{
+		Msg("! [NET] CActor::net_Spawn failed at inherited::net_Spawn (ID=%u LOCAL=%d ASPLAYER=%d client=%d server=%d)",
+			E->ID, E->s_flags.is(M_SPAWN_OBJECT_LOCAL), E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER), OnClient(), OnServer());
+		return FALSE;
+	}
 
 	CSE_ALifeTraderAbstract* pTA = smart_cast<CSE_ALifeTraderAbstract*>(DC);
 	set_money(pTA->m_dwMoney, false);
@@ -688,9 +879,38 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 	LastPosL.clear();
 #endif
 
+	const bool dedicated_single_actor_visual_fix =
+		!g_dedicated_server &&
+		OnClient() &&
+		Game().Type() == eGameIDSingle &&
+		E->ID != 0;
+
+	if (dedicated_single_actor_visual_fix)
+	{
+		static const shared_str forced_visual = "actors\\stalker_hero_coc\\sviter_3";
+		const shared_str current_visual = cNameVisual();
+		const bool has_current_visual = current_visual.size() != 0;
+		const bool is_placeholder_visual =
+			!has_current_visual ||
+			(0 == xr_strcmp(current_visual.c_str(), "actors\\stalker_neutral\\stalker_neutral_1")) ||
+			(0 == xr_strcmp(current_visual.c_str(), "actors\\stalker_neutral\\stalker_neutral_1.ogf")) ||
+			(0 == xr_strcmp(current_visual.c_str(), "actors\\stalker_hero\\stalker_hero_1")) ||
+			(0 == xr_strcmp(current_visual.c_str(), "actors\\stalker_hero\\stalker_hero_1.ogf"));
+
+		if (is_placeholder_visual && current_visual != forced_visual)
+		{
+			Msg("--- [CL] Dedicated single bridge: force actor visual [%s] -> [%s] (id=%u local=%d).",
+				current_visual.c_str(), forced_visual.c_str(), E->ID, E->s_flags.is(M_SPAWN_OBJECT_LOCAL) ? 1 : 0);
+			cNameVisual_set(forced_visual);
+			OnChangeVisual();
+		}
+	}
+
 	SetDefaultVisualOutfit(cNameVisual());
 
-	smart_cast<IKinematics*>(Visual())->CalculateBones();
+	IKinematics* V = smart_cast<IKinematics*>(Visual());
+	if (V)
+		V->CalculateBones();
 
 	//--------------------------------------------------------------
 	inventory().SetPrevActiveSlot(NO_ACTIVE_SLOT);
@@ -731,10 +951,18 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 		setLocal(FALSE);
 
 	if (Game().Type() == eGameIDSingle && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->s_flags.is(M_SPAWN_OBJECT_LOCAL))
+	{
 		TryBindDbActorToLocalPlayer(ID());
+		SendDedicatedSingleLocalActorVisual(this, "net_spawn");
+	}
 
 	//Alun: In theory it will call SwitchNightVision 'true' when outfit or helmet spawn and moved to slot if m_bNightVisionOn is true
 	m_bNightVisionOn = m_trader_flags.test(CSE_ALifeTraderAbstract::eTraderFlagNightVisionActive);
+
+	const bool is_mp_actor_class = (smart_cast<CActorMP*>(this) != nullptr);
+	Msg("--- [NET] CActor::net_Spawn OK (obj_id=%u self_id=%u hp=%.3f alive=%d local=%d asplayer=%d client=%d server=%d mp_class=%d)",
+		E->ID, ID(), GetfHealth(), g_Alive(), E->s_flags.is(M_SPAWN_OBJECT_LOCAL),
+		E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER), OnClient(), OnServer(), is_mp_actor_class ? 1 : 0);
 
 	return TRUE;
 }
@@ -745,7 +973,26 @@ namespace crash_saving {
 
 void CActor::net_Destroy()
 {
+	extern luabind::functor<void>* CGameObject_NetDestroy;
+
+	luabind::functor<void>* saved_net_destroy_callback = nullptr;
+	const bool skip_actor_net_destroy_callback =
+		g_dedicated_server &&
+		Game().Type() == eGameIDSingle;
+
+	if (skip_actor_net_destroy_callback)
+	{
+		saved_net_destroy_callback = CGameObject_NetDestroy;
+		CGameObject_NetDestroy = nullptr;
+	}
+
 	inherited::net_Destroy();
+
+	if (skip_actor_net_destroy_callback)
+	{
+		CGameObject_NetDestroy = saved_net_destroy_callback;
+		Msg("--- [SV] Dedicated single: skipped actor net_destroy Lua callback for [%u].", ID());
+	}
 
 	if (m_holder_id != ALife::_OBJECT_ID(-1))
 		Level().client_spawn_manager().remove(m_holder_id, ID());
@@ -780,6 +1027,9 @@ void CActor::net_Destroy()
 	m_holderID = u16(-1);
 
 	SetDefaultVisualOutfit(NULL);
+
+	if (g_actor == this)
+		g_actor = NULL;
 
 	Engine.Sheduler.Unregister(this);
 
@@ -919,6 +1169,7 @@ void CActor::ChangeVisual(shared_str NewVisual)
 	}
 
 	cNameVisual_set(NewVisual);
+	SendDedicatedSingleLocalActorVisual(this, "change_visual");
 
 	g_SetAnimation(mstate_real);
 	Visual()->dcast_PKinematics()->CalculateBones_Invalidate();
@@ -1281,7 +1532,9 @@ void CActor::make_Interpolation()
 
 			VERIFY2(_valid(renderable.xform), *cName());
 
-			//			r_model_yaw		= angle_lerp	(IStart.o_model,IEnd.o_model,		factor);	
+			// OMP/original behavior: model yaw is updated by g_sv_Orientate from NET_Last.
+			// Keeping this disabled avoids fighting with runtime orientation.
+			// r_model_yaw = angle_lerp(IStart.o_model, IEnd.o_model, factor);
 			unaffected_r_torso.yaw = angle_lerp(IStart.o_torso.yaw, IEnd.o_torso.yaw, factor);
 			unaffected_r_torso.pitch = angle_lerp(IStart.o_torso.pitch, IEnd.o_torso.pitch, factor);
 			unaffected_r_torso.roll = angle_lerp(IStart.o_torso.roll, IEnd.o_torso.roll, factor);

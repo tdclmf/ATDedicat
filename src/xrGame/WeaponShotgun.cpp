@@ -59,8 +59,8 @@ bool CWeaponShotgun::Action(u16 cmd, u32 flags)
 	if (inherited::Action(cmd, flags)) return true;
 
 	if (m_bTriStateReload && GetState() == eReload &&
-		cmd == kWPN_FIRE && flags & CMD_START &&
-		m_sub_state == eSubstateReloadInProcess || m_sub_state == eSubstateReloadInProcessEmptyEnd) //���������� ������������
+		cmd == kWPN_FIRE && (flags & CMD_START) &&
+		(m_sub_state == eSubstateReloadInProcess || m_sub_state == eSubstateReloadInProcessEmptyEnd)) //���������� ������������
 	{
 		AddCartridge(1);
 		m_sub_state = eSubstateReloadEnd;
@@ -126,6 +126,30 @@ void CWeaponShotgun::Reload()
 void CWeaponShotgun::TriStateReload()
 {
 	if (m_magazine.size() == (u32)iMagazineSize || !HaveCartridgeInInventory(1))return;
+	SetAwaitingLocalAmmoSyncAfterReload(false);
+
+	if (g_dedicated_server)
+	{
+		CWeapon::Reload();
+
+		if (ParentIsActor())
+		{
+			// Actor-owned ammo is synced from client; instant server refill enables fire during reload animation.
+			SetPending(FALSE);
+			SetAwaitingLocalAmmoSyncAfterReload(true);
+			m_sub_state = eSubstateReloadBegin;
+			SwitchState(eIdle);
+			return;
+		}
+
+		ReloadMagazine();
+		SetPending(FALSE);
+		SetAwaitingLocalAmmoSyncAfterReload(false);
+		m_sub_state = eSubstateReloadBegin;
+		SwitchState(eIdle);
+		return;
+	}
+
 	CWeapon::Reload();
 	m_sub_state = eSubstateReloadBegin;
 	SwitchState(eReload);

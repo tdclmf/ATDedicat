@@ -805,6 +805,9 @@ public:
 	               LPCSTR ammoSect = NULL,
 	               u32 ParentID = 0xffffffff);
 	bool SwitchAmmoType(u32 flags);
+	void SyncLocalAmmoToServerIfNeeded();
+	void SetAwaitingLocalAmmoSyncAfterReload(bool value) { m_awaiting_local_ammo_sync_after_reload = value; }
+	bool IsAwaitingLocalAmmoSyncAfterReload() const { return m_awaiting_local_ammo_sync_after_reload; }
 
 	float m_APk;
 
@@ -1016,6 +1019,12 @@ public:
 protected:
 	int iAmmoElapsed; // ammo in magazine, currently
 	int iMagazineSize; // size (in bullets) of magazine
+	u16 m_local_ammo_sync_seq;
+	u16 m_last_received_local_ammo_sync_seq;
+	int m_last_sent_local_ammo_elapsed;
+	u8 m_last_sent_local_ammo_type;
+	u32 m_last_local_ammo_sync_send_time;
+	bool m_awaiting_local_ammo_sync_after_reload;
 
 	//äëÿ ïîäñ÷åòà â GetSuitableAmmoTotal
 	mutable int m_iAmmoCurrentTotal;

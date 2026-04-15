@@ -19,6 +19,7 @@
 #include "file_transfer.h"
 #include "screenshot_server.h"
 #include "xrServer_info.h"
+#include "weapon_trace.h"
 #include <functional>
 
 #pragma warning(push)
@@ -373,6 +374,37 @@ void console_log_cb(LPCSTR text)
 	_tmp_log.push_back(text);
 }
 
+static bool command_matches(LPCSTR command_text, LPCSTR command_name)
+{
+	if (!command_text || !command_name)
+		return false;
+
+	while (*command_text == ' ' || *command_text == '\t')
+		++command_text;
+
+	if (*command_text == '@')
+	{
+		++command_text;
+		while (*command_text == ' ' || *command_text == '\t')
+			++command_text;
+	}
+
+	const size_t cmd_len = xr_strlen(command_name);
+	if (0 != _strnicmp(command_text, command_name, cmd_len))
+		return false;
+
+	const char tail = command_text[cmd_len];
+	return (tail == 0) || (tail == ' ') || (tail == '\t') || (tail == '\r') || (tail == '\n');
+}
+
+static bool is_dedicated_single_debug_command(LPCSTR command_text)
+{
+	return
+		command_matches(command_text, "g_spawn") ||
+		command_matches(command_text, "g_spawn_inv") ||
+		command_matches(command_text, "g_spawn_squad");
+}
+
 u32 xrServer::OnDelayedMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadcasting with "flags" as returned
 {
 	u16 type;
@@ -392,18 +424,44 @@ u32 xrServer::OnDelayedMessage(NET_Packet& P, ClientID sender) // Non-Zero means
 		break;
 	case M_REMOTE_CONTROL_CMD:
 		{
-			if (CL->m_admin_rights.m_has_admin_rights)
+			string1024 buff = {};
+			P.r_stringZ(buff);
+
+			const bool has_admin_rights = CL && CL->m_admin_rights.m_has_admin_rights;
+			const bool allow_dedicated_single_debug =
+				CL &&
+				g_dedicated_server &&
+				game &&
+				(game->Type() == eGameIDSingle) &&
+				is_dedicated_single_debug_command(buff);
+
+			if (has_admin_rights || allow_dedicated_single_debug)
 			{
-				string1024 buff;
-				P.r_stringZ(buff);
-				Msg("* Radmin [%s] is running command: %s", CL->ps->getName(), buff);
+				if (has_admin_rights)
+					Msg("* Radmin [%s] is running command: %s", CL->ps->getName(), buff);
+				else if (CL->ps)
+					Msg("--- [SV] Dedicated single bridge: debug command from [%s]: %s", CL->ps->getName(), buff);
+
 				SetLogCB(console_log_cb);
 				_tmp_log.clear();
-				LPSTR result_command;
-				string64 tmp_number_str;
-				xr_sprintf(tmp_number_str, " raid:%u", CL->ID.value());
-				STRCONCAT(result_command, buff, tmp_number_str);
-				Console->Execute(result_command);
+
+				if (has_admin_rights)
+				{
+					LPSTR result_command;
+					string64 tmp_number_str;
+					xr_sprintf(tmp_number_str, " raid:%u", CL->ID.value());
+					STRCONCAT(result_command, buff, tmp_number_str);
+					Console->Execute(result_command);
+				}
+				else
+				{
+					LPSTR result_command;
+					string64 tmp_number_str;
+					xr_sprintf(tmp_number_str, " raid:%u", CL->ID.value());
+					STRCONCAT(result_command, buff, tmp_number_str);
+					Console->Execute(result_command);
+				}
+
 				SetLogCB(NULL);
 
 				NET_Packet P_answ;
@@ -467,8 +525,12 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
 		break;
 	case M_SPAWN:
 		{
-			if (CL->flags.bLocal)
+			const bool allow_dedicated_single_remote_spawn =
+				g_dedicated_server && game && game->Type() == eGameIDSingle;
+			if (CL && (CL->flags.bLocal || allow_dedicated_single_remote_spawn))
 				Process_spawn(P, sender);
+			else if (allow_dedicated_single_remote_spawn)
+				Msg("! [SV] M_SPAWN ignored: sender client is null in dedicated single mode.");
 #ifdef DEBUG
 			VERIFY(verify_entities());
 #endif
@@ -671,6 +733,7 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
 		break;
 	case M_PLAYER_FIRE:
 		{
+			WPN_TRACE("xrServer::OnMessage M_PLAYER_FIRE sender=0x%08x game=%s", sender.value(), game ? "yes" : "no");
 			if (game)
 				game->OnPlayerFire(sender, P);
 		}
@@ -863,7 +926,7 @@ if( dbg_net_Draw_Flags.test( dbg_destroy ) )
 //--------------------------------------------------------------------
 void xrServer::Server_Client_Check(IClient* CL)
 {
-	// Ëîãèðóåì âõîä â ôóíêöèþ
+	// Ð›Ð¾Ð³Ð¸Ñ€ÑƒÐµÐ¼ Ð²Ñ…Ð¾Ð´ Ð² Ñ„ÑƒÐ½ÐºÑ†Ð¸ÑŽ
 	Msg("* [Server_Client_Check] Start check for client: ID=%u, Connected=%d, ProcessID=%u",
 		CL->ID.value(), CL->flags.bConnected, CL->process_id);
 	if (SV_Client) {

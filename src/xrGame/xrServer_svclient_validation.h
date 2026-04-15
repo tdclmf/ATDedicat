@@ -2,5 +2,6 @@
 #define XRSERVER_SVCLIENT_VALIDATION
 
 bool is_object_valid_on_svclient(u16 id_entity);
+bool should_validate_object_on_svclient();
 
 #endif

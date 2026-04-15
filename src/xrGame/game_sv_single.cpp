@@ -46,27 +46,76 @@ void game_sv_Single::Create(shared_str& options)
 
 void game_sv_Single::RespawnPlayer(ClientID id_who, bool bReady)
 {
+	if (!g_dedicated_server)
+		return;
+
 	xrClientData* xrCData = server().ID_to_client(id_who);
-	if (!xrCData)
+	if (!xrCData || !xrCData->ps)
 		return;
 
 	if (g_dedicated_server && xrCData == server().GetServerClient())
 	{
-		if (xrCData->ps)
-			xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP);
+		xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP);
 		Msg("--- [SV] Dedicated server system client respawn request ignored.");
 		return;
 	}
 
-	inherited::RespawnPlayer(id_who, bReady);
+	CSE_Abstract* pOwner = xrCData->owner;
+	CSE_ALifeCreatureActor* pA = pOwner ? smart_cast<CSE_ALifeCreatureActor*>(pOwner) : nullptr;
+	CSE_Spectator* pS = pOwner ? smart_cast<CSE_Spectator*>(pOwner) : nullptr;
+
+	if (pA)
+	{
+		AllowDeadBodyRemove(id_who, xrCData->ps->GameID);
+		m_CorpseList.push_back(pOwner->ID);
+	}
+
+	if (pOwner && pOwner->owner != server().GetServerClient())
+		pOwner->owner = (xrClientData*)server().GetServerClient();
+
+	if (pS)
+	{
+		NET_Packet P;
+		u_EventGen(P, GE_DESTROY, pS->ID);
+		Level().Send(P, net_flags(TRUE, TRUE));
+	}
+
+	// Dedicated-single bridge: use mp_actor pipeline for networked client players.
+	// This keeps MP net state import/export and script binding behavior.
+	SpawnPlayer(id_who, "mp_actor");
 
 	if (xrCData->owner)
 	{
 		CSE_Abstract* E = xrCData->owner;
 		E->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
 		E->s_flags.set(M_SPAWN_OBJECT_ASPLAYER, TRUE);
-		Msg("--- [SV] mp_actor [%u] successfully created and assigned to [%s] with LOCAL and ASPLAYER flags.", E->ID, xrCData->name.c_str());
+
+		CSE_ALifeCreatureAbstract* CA = smart_cast<CSE_ALifeCreatureAbstract*>(E);
+		if (CA)
+		{
+			CA->set_killer_id(ALife::_OBJECT_ID(-1));
+			CA->set_health(1.f);
+			CA->m_bDeathIsProcessed = false;
+		}
+
+		Msg("--- [SV] mp_actor [%u] successfully created and assigned to [%s] with LOCAL and ASPLAYER flags. (alive forced)", E->ID, xrCData->name.c_str());
 	}
+
+	if (xrCData->owner)
+		xrCData->ps->SetGameID(xrCData->owner->ID);
+
+	xrCData->ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR | GAME_PLAYER_FLAG_VERY_VERY_DEAD | GAME_PLAYER_FLAG_SKIP);
+	xrCData->ps->setFlag(GAME_PLAYER_FLAG_READY);
+
+	Msg("--- [SV] RespawnPlayer done for [%s]: GameID=%u flags=0x%04x SPECT=%d DEAD=%d SKIP=%d",
+		xrCData->name.c_str(),
+		xrCData->ps->GameID,
+		xrCData->ps->flags__,
+		xrCData->ps->testFlag(GAME_PLAYER_FLAG_SPECTATOR) ? 1 : 0,
+		xrCData->ps->testFlag(GAME_PLAYER_FLAG_VERY_VERY_DEAD) ? 1 : 0,
+		xrCData->ps->testFlag(GAME_PLAYER_FLAG_SKIP) ? 1 : 0);
+
+	signal_Syncronize();
 }
 
 void game_sv_Single::OnCreate(u16 id_who)
@@ -400,6 +449,7 @@ void game_sv_Single::OnPlayerConnect(ClientID id_who)
 	inherited::OnPlayerConnect(id_who);
 	xrClientData* xrCData = server().ID_to_client(id_who);
 	game_PlayerState* ps_who = xrCData->ps;
+	xrCData->m_requested_player_visual = NULL;
 
 	if (!xrCData->flags.bReconnect)
 	{
@@ -409,7 +459,7 @@ void game_sv_Single::OnPlayerConnect(ClientID id_who)
 	}
 
 	ps_who->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
-	ps_who->resetFlag(GAME_PLAYER_FLAG_SKIP);
+	ps_who->resetFlag(GAME_PLAYER_FLAG_SKIP + GAME_PLAYER_FLAG_VERY_VERY_DEAD);
 
 	if (g_dedicated_server && xrCData == server().GetServerClient())
 	{
@@ -420,13 +470,63 @@ void game_sv_Single::OnPlayerConnect(ClientID id_who)
 	SetPlayersDefItems(ps_who);
 }
 
+void game_sv_Single::OnPlayerDisconnect(ClientID id_who, LPSTR Name, u16 GameID)
+{
+	// Dedicated-single bridge:
+	// do not route disconnect through MP KillPlayer/GE_DIE path
+	// (it triggers death callbacks and unstable teardown order for actor proxies).
+	if (!g_dedicated_server)
+	{
+		inherited::OnPlayerDisconnect(id_who, Name, GameID);
+		return;
+	}
+
+	NET_Packet P;
+	GenerateGameMessage(P);
+	P.w_u32(GAME_EVENT_PLAYER_DISCONNECTED);
+	P.w_stringZ(Name);
+	u_EventSend(P);
+
+	xrClientData* xrCData = server().ID_to_client(id_who);
+	if (xrCData && xrCData->ps)
+	{
+		xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP + GAME_PLAYER_FLAG_SPECTATOR + GAME_PLAYER_FLAG_VERY_VERY_DEAD);
+	}
+
+	if (GameID != u16(-1))
+	{
+		CSE_Abstract* pSObject = get_entity_from_eid(GameID);
+		if (pSObject)
+		{
+			pSObject->owner = (xrClientData*)server().GetServerClient();
+
+			NET_Packet Pdestroy;
+			u_EventGen(Pdestroy, GE_DESTROY, GameID);
+			Level().Send(Pdestroy, net_flags(TRUE, TRUE));
+			Msg("--- [SV] Dedicated single disconnect: destroy player object [%u].", GameID);
+		}
+	}
+
+	if (xrCData)
+		xrCData->owner = nullptr;
+
+	Msg("--- [SV] Dedicated single disconnect: skip KillPlayer for [%s][%u].", Name ? Name : "<null>", GameID);
+
+	game_sv_GameState::OnPlayerDisconnect(id_who, Name, GameID);
+}
+
 void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 {
 	xrClientData* xrCData = server().ID_to_client(id_who);
 	if (!xrCData || !xrCData->ps)
 		return;
 
-	// Ñèñòåìíûé êëèåíò äåäèêà íàì íå íóæåí â ìèðå
+	// Keep vanilla single-player flow untouched.
+	// Dedicated bridge logic is enabled only for dedicated runtime.
+	if (!g_dedicated_server)
+		return;
+
+	// Ð¡Ð¸ÑÑ‚ÐµÐ¼Ð½Ñ‹Ð¹ ÐºÐ»Ð¸ÐµÐ½Ñ‚ Ð´ÐµÐ´Ð¸ÐºÐ° Ð½Ð°Ð¼ Ð½Ðµ Ð½ÑƒÐ¶ÐµÐ½ Ð² Ð¼Ð¸Ñ€Ðµ
 	if (g_dedicated_server && xrCData == server().GetServerClient())
 	{
 		Msg("--- [SV] Dedicated Server system client registered. Skipping body spawn.");
@@ -435,8 +535,8 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 
 	if (!xrCData->owner)
 	{
-		Msg("--- [SV] Client [%s] connected. Spawning spectator shell...", xrCData->name.c_str());
-		SpawnPlayer(id_who, "spectator");
+		Msg("--- [SV] Client [%s] connected. mp_actor spawn will be handled on ready.", xrCData->name.c_str());
+		// spectator shell disabled for dedicated-single actor flow
 	}
 	else
 	{
@@ -457,6 +557,9 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 
 void game_sv_Single::OnPlayerReady(ClientID id)
 {
+	if (!g_dedicated_server)
+		return;
+
 	if (m_phase == GAME_PHASE_INPROGRESS)
 	{
 		xrClientData* xrCData = server().ID_to_client(id);
@@ -472,30 +575,137 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 
 		if (!xrCData->owner)
 		{
-			Msg("--- [SV] No owner for [%s], spawning spectator shell before respawn...", xrCData->name.c_str());
-			SpawnPlayer(id, "spectator");
+			Msg("--- [SV] No owner for [%s], spawning mp_actor directly...", xrCData->name.c_str());
+			RespawnPlayer(id, true);
 			if (!xrCData->owner)
 				return;
 		}
 
-		if (ps->IsSkip())
-			return;
+			if (ps->IsSkip())
+			{
+				// Non-system client can be stuck with SKIP from early connect phase.
+				if (xrCData != server().GetServerClient())
+				{
+					ps->resetFlag(GAME_PLAYER_FLAG_SKIP);
+					Msg("--- [SV] OnPlayerReady: cleared stale SKIP for [%s].", xrCData->name.c_str());
+				}
+				else
+					return;
+			}
 
 		if (ps->testFlag(GAME_PLAYER_FLAG_SPECTATOR) || ps->testFlag(GAME_PLAYER_FLAG_VERY_VERY_DEAD))
 		{
 			Msg("--- [SV] Spawning mp_actor for [%s]...", xrCData->name.c_str());
 			RespawnPlayer(id, true);
-			ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR);
+			ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR + GAME_PLAYER_FLAG_VERY_VERY_DEAD + GAME_PLAYER_FLAG_SKIP);
 		}
 	}
 }
 
 void game_sv_Single::SetSkin(CSE_Abstract* E, u16 Team, u16 ID)
 {
-	if (auto visual = smart_cast<CSE_Visual*>(E))
-		visual->set_visual("actors\\hero\\stalker_novice.ogf");
-}
+	auto visual = smart_cast<CSE_Visual*>(E);
+	if (!visual)
+	{
+		Msg("--- [SV] SetSkin: no visual component for [%s].", E ? E->name_replace() : "<null>");
+		return;
+	}
 
+	xrClientData* matched_client = nullptr;
+	if (E && E->name_replace() && E->name_replace()[0])
+	{
+		struct client_by_actor_name_finder
+		{
+			LPCSTR actor_name;
+			xrClientData* result;
+
+			client_by_actor_name_finder(LPCSTR name) : actor_name(name), result(nullptr)
+			{
+			}
+
+			void operator()(IClient* client)
+			{
+				if (result || !actor_name || !actor_name[0])
+					return;
+
+				xrClientData* xr_client = static_cast<xrClientData*>(client);
+				if (!xr_client || !xr_client->ps)
+					return;
+
+				if (Level().Server && xr_client == Level().Server->GetServerClient())
+					return;
+
+				if (0 == xr_strcmp(xr_client->name.c_str(), actor_name))
+				{
+					result = xr_client;
+					return;
+				}
+
+				if (xr_client->owner && 0 == xr_strcmp(xr_client->owner->name_replace(), actor_name))
+					result = xr_client;
+			}
+		};
+
+		client_by_actor_name_finder finder(E->name_replace());
+		server().ForEachClientDo(finder);
+		matched_client = finder.result;
+	}
+
+	const LPCSTR requested_visual =
+		(matched_client && matched_client->m_requested_player_visual.size())
+		? matched_client->m_requested_player_visual.c_str()
+		: nullptr;
+
+	Msg("--- [SV] SetSkin: entry for [%s], dedicated=%d, single=%d, current=[%s], requested=[%s].",
+		E->name_replace(),
+		g_dedicated_server ? 1 : 0,
+		IsGameTypeSingle() ? 1 : 0,
+		(visual->get_visual() && xr_strlen(visual->get_visual())) ? visual->get_visual() : "<empty>",
+		(requested_visual && requested_visual[0]) ? requested_visual : "<none>");
+
+	// Dedicated-single bridge: preferred visual comes from client save/state.
+	// Fallback to this visual only when client did not provide one.
+	static constexpr LPCSTR kDedicatedSingleSpawnVisual = "actors\\stalker_hero_coc\\sviter_3";
+
+	if (requested_visual && requested_visual[0])
+	{
+		visual->set_visual(requested_visual);
+		Msg("--- [SV] SetSkin: applied requested client visual [%s] for [%s].", visual->get_visual(), E->name_replace());
+		return;
+	}
+
+	const LPCSTR current_visual = visual->get_visual();
+	const bool has_visual = current_visual && xr_strlen(current_visual);
+	const bool is_spawn_placeholder_visual =
+		!has_visual ||
+		(0 == xr_strcmp(current_visual, "actors\\stalker_neutral\\stalker_neutral_1")) ||
+		(0 == xr_strcmp(current_visual, "actors\\stalker_neutral\\stalker_neutral_1.ogf")) ||
+		(0 == xr_strcmp(current_visual, "actors\\stalker_hero\\stalker_hero_1")) ||
+		(0 == xr_strcmp(current_visual, "actors\\stalker_hero\\stalker_hero_1.ogf"));
+
+	if (g_dedicated_server)
+	{
+		if (is_spawn_placeholder_visual)
+		{
+			visual->set_visual(kDedicatedSingleSpawnVisual);
+			Msg("--- [SV] SetSkin: set initial dedicated visual [%s] for [%s].", visual->get_visual(), E->name_replace());
+		}
+		else
+		{
+			Msg("--- [SV] SetSkin: keep existing visual [%s] for [%s].", visual->get_visual(), E->name_replace());
+		}
+		return;
+	}
+
+	if (has_visual)
+	{
+		Msg("--- [SV] SetSkin: keep existing visual [%s] for [%s].", visual->get_visual(), E->name_replace());
+		return;
+	}
+
+	visual->set_visual(kDedicatedSingleSpawnVisual);
+	Msg("--- [SV] SetSkin: fallback visual [%s] set for [%s].", visual->get_visual(), E->name_replace());
+}
 bool game_sv_Single::AssignOwnershipToConnectingClient(CSE_Abstract* E, xrClientData* CL)
 {
 	auto act = smart_cast<CSE_ALifeCreatureActor*>(E);

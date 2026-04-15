@@ -153,8 +153,28 @@ void game_cl_GameState::net_import_state(NET_Packet& P)
 		{
 			if (ID == local_svdpnid) //Level().GetClientID())
 			{
-				game_PlayerState* tmp = createPlayerState(&P);
-				xr_delete(tmp);
+				IP = local_player;
+				if (!IP)
+				{
+					IP = createPlayerState(NULL);
+					local_player = IP;
+				}
+
+				u16 OldFlags = IP->flags__;
+				u8 OldVote = IP->m_bCurrentVoteAgreed;
+				IP->net_Import(P);
+				if (OldFlags != IP->flags__)
+					OnPlayerFlagsChanged(IP);
+				if (OldVote != IP->m_bCurrentVoteAgreed)
+					OnPlayerVoted(IP);
+
+				PLAYERS_MAP_IT local_it = players.find(ID);
+				if (local_it == players.end())
+					players.insert(mk_pair(ID, IP));
+				else if (local_it->second != IP)
+					local_it->second = IP;
+
+				valid_players.push_back(ID);
 				continue;
 			}
 
@@ -207,8 +227,21 @@ void game_cl_GameState::net_import_update(NET_Packet& P)
 	}
 	else
 	{
-		game_PlayerState* tmp = createPlayerState(&P);
-		xr_delete(tmp);
+		if (ID == local_svdpnid && local_player)
+		{
+			u16 OldFlags = local_player->flags__;
+			u8 OldVote = local_player->m_bCurrentVoteAgreed;
+			local_player->net_Import(P);
+			if (OldFlags != local_player->flags__)
+				OnPlayerFlagsChanged(local_player);
+			if (OldVote != local_player->m_bCurrentVoteAgreed)
+				OnPlayerVoted(local_player);
+		}
+		else
+		{
+			game_PlayerState* tmp = createPlayerState(&P);
+			xr_delete(tmp);
+		}
 	}
 
 	//Syncronize GameTime

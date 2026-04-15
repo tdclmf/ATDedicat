@@ -16,6 +16,25 @@
 #define GRENADE_REMOVE_TIME		30000
 const float default_grenade_detonation_threshold_hit = 100;
 
+namespace
+{
+	bool IsDedicatedSingleLocalGrenadeOwner(const CGrenade* grenade)
+	{
+		if (!g_pGameLevel || !grenade || g_dedicated_server || !OnClient())
+			return false;
+
+		const CActor* actor = smart_cast<const CActor*>(grenade->H_Parent());
+		if (!actor)
+			return false;
+
+		game_cl_GameState* game_cl = smart_cast<game_cl_GameState*>(&Game());
+		const bool local_player_id_match =
+			game_cl && game_cl->local_player && game_cl->local_player->GameID == actor->ID();
+
+		return local_player_id_match || Level().CurrentControlEntity() == actor || Level().CurrentEntity() == actor;
+	}
+}
+
 CGrenade::CGrenade(void)
 {
 	m_destroy_callback.clear();
@@ -108,7 +127,7 @@ void CGrenade::State(u32 state, u32 old_state)
 				xr_delete(m_pPhysicsShell);
 				m_dwDestroyTime = 0xffffffff;
 				PutNextToSlot();
-				if (Local())
+				if (Local() || IsDedicatedSingleLocalGrenadeOwner(this))
 				{
 #ifndef MASTER_GOLD
 					Msg( "Destroying local grenade[%d][%d]", ID(), Device.dwFrame );
@@ -191,7 +210,9 @@ void CGrenade::Throw()
 void CGrenade::Destroy()
 {
 	//Generate Expode event
+	Fvector explode_pos = Position();
 	Fvector normal;
+	Fvector explode_normal;
 
 	if (m_destroy_callback)
 	{
@@ -199,11 +220,30 @@ void CGrenade::Destroy()
 		m_destroy_callback = destroy_callback(NULL);
 	}
 
+	if (m_pPhysicsShell)
+	{
+		Fmatrix shell_xform;
+		m_pPhysicsShell->GetGlobalTransformDynamic(&shell_xform);
+		if (_valid(shell_xform))
+			explode_pos.set(shell_xform.c);
+	}
+	if (!_valid(explode_pos))
+		explode_pos.set(Position());
+
 	FindNormal(normal);
-	CExplosive::GenExplodeEvent(Position(), normal);
+	explode_normal.set(normal);
+	if (m_pPhysicsShell)
+	{
+		Fvector shell_velocity{};
+		m_pPhysicsShell->get_LinearVel(shell_velocity);
+		if (_valid(shell_velocity) && shell_velocity.square_magnitude() > EPS)
+		{
+			shell_velocity.normalize();
+			explode_normal.set(shell_velocity);
+		}
+	}
+	CExplosive::GenExplodeEvent(explode_pos, explode_normal);
 }
-
-
 bool CGrenade::Useful() const
 {
 	bool res = (/* !m_throw && */ m_dwDestroyTime == 0xffffffff && CExplosive::Useful() && TestServerFlag(
@@ -342,7 +382,8 @@ void CGrenade::DeactivateItem()
 {
 	//Drop grenade if primed
 	StopCurrentAnimWithoutCallback();
-	if (!GetTmpPreDestroy() && Local() && (GetState() == eThrowStart || GetState() == eReady || GetState() == eThrow))
+	if (!GetTmpPreDestroy() && (Local() || IsDedicatedSingleLocalGrenadeOwner(this)) &&
+		(GetState() == eThrowStart || GetState() == eReady || GetState() == eThrow))
 	{
 		if (m_fake_missile)
 		{

@@ -295,7 +295,7 @@ void CLevel::IR_OnKeyboardPress(int key)
 #ifndef MASTER_GOLD
     switch (key) {
     case DIK_F7: {
-        if (OnClient()) return;
+        if (OnClient()) break;
         FS.get_path("$game_config$")->m_Flags.set(FS_Path::flNeedRescan, TRUE);
         FS.get_path("$game_scripts$")->m_Flags.set(FS_Path::flNeedRescan, TRUE);
         FS.rescan_pathes();
