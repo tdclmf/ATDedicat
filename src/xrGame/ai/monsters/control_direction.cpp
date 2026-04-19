@@ -134,7 +134,13 @@ void CControlDirection::pitch_correction()
 	}
 
 	// get current plane
+	if (!ai().get_level_graph())
+		return;
+
 	u32 node = m_object->ai_location().level_vertex_id();
+	if (!ai().level_graph().valid_vertex_id(node))
+		return;
+
 	Fplane P;
 	pvDecompress(P.n, ai().level_graph().vertex(node)->plane());
 	P.d = -P.n.dotproduct(ai().level_graph().vertex_position(node));

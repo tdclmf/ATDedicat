@@ -337,8 +337,17 @@ BOOL CBaseMonster::net_Spawn(CSE_Abstract* DC)
 		return (FALSE);
 
 	CSE_Abstract* e = (CSE_Abstract*)(DC);
-	R_ASSERT2(ai().get_level_graph() && ai().get_cross_table() && (ai().level_graph().level_id() != u32(-1)),
-	          "There is no AI-Map, level graph, cross table, or graph is not compiled into the game graph!");
+	const bool has_ai_map = ai().get_level_graph() && ai().get_cross_table() &&
+	                        (ai().level_graph().level_id() != u32(-1));
+	if (!has_ai_map)
+	{
+		Msg("! [NET] CBaseMonster::net_Spawn missing AI-map for [%s][%u], using minimal spawn path.",
+		    cName().c_str(), ID());
+		m_pPhysics_support->in_NetSpawn(e);
+		setVisible(TRUE);
+		setEnabled(TRUE);
+		return (TRUE);
+	}
 	monster_squad().register_member((u8)g_Team(), (u8)g_Squad(), (u8)g_Group(), this);
 	settings_overrides();
 
@@ -395,7 +404,8 @@ void CBaseMonster::net_Destroy()
 
 	m_pPhysics_support->in_NetDestroy();
 
-	monster_squad().remove_member((u8)g_Team(), (u8)g_Squad(), (u8)g_Group(), this);
+	if (ai().get_level_graph() && ai().get_cross_table() && (ai().level_graph().level_id() != u32(-1)))
+		monster_squad().remove_member((u8)g_Team(), (u8)g_Squad(), (u8)g_Group(), this);
 
 #ifdef DEBUG
 	m_show_debug_info				= 0;

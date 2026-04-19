@@ -284,9 +284,10 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 
 			game->on_death(e_dest, e_src);
 
-			xrClientData* c_src = e_src->owner; // клиент, чей юнит убил
+			// Killer source may be an ALife entity without a live client owner.
+			xrClientData* c_src = (xrClientData*)game->get_client(id_src);
 
-			if (c_src->owner->ID == id_src)
+			if (c_src && c_src->owner && c_src->owner->ID == id_src)
 			{
 				// Main unit
 				P.w_begin(M_EVENT);
@@ -301,7 +302,7 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 
 			//////////////////////////////////////////////////////////////////////////
 			// 
-			if (OnServer()) // werasik2aa not sure
+			if (OnServer() && c_src) // werasik2aa not sure
 			{
 				P.w_begin(M_EVENT);
 				P.w_u32(timestamp);
@@ -459,3 +460,4 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 		break;
 	}
 }
+

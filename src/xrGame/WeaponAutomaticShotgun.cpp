@@ -312,17 +312,33 @@ void CWeaponAutomaticShotgun::net_Export(NET_Packet& P)
 
 void CWeaponAutomaticShotgun::net_Import(NET_Packet& P)
 {
-	inherited::net_Import(P);
-	u8 AmmoCount = P.r_u8();
-	for (u32 i = 0; i < AmmoCount; i++)
-	{
-		u8 LocalAmmoType = P.r_u8();
-		if (i >= m_magazine.size()) continue;
-		CCartridge& l_cartridge = *(m_magazine.begin() + i);
-		if (LocalAmmoType == l_cartridge.m_LocalAmmoType) continue;
+    inherited::net_Import(P);
+    u8 AmmoCount = P.r_u8();
+    for (u32 i = 0; i < AmmoCount; i++)
+    {
+        u8 LocalAmmoType = P.r_u8();
+        if (i >= m_magazine.size()) continue;
+        if (LocalAmmoType >= m_ammoTypes.size())
+        {
+            Msg("! [NET] CWeaponAutomaticShotgun::net_Import invalid ammo type=%u (types=%u) for [%s][%u]",
+                LocalAmmoType, (u32)m_ammoTypes.size(), cNameSect().c_str(), ID());
+            continue;
+        }
+
+        CCartridge& l_cartridge = *(m_magazine.begin() + i);
+        if (LocalAmmoType == l_cartridge.m_LocalAmmoType) continue;
+
+        const shared_str& ammo_sect = m_ammoTypes[LocalAmmoType];
+        if (!ammo_sect.size() || !pSettings->section_exist(ammo_sect.c_str()))
+        {
+            Msg("! [NET] CWeaponAutomaticShotgun::net_Import skipped invalid ammo section [%s] type=%u for [%s][%u]",
+                ammo_sect.size() ? ammo_sect.c_str() : "<empty>", LocalAmmoType, cNameSect().c_str(), ID());
+            continue;
+        }
+
 #ifdef DEBUG
-		Msg("! %s reload to %s", *l_cartridge.m_ammoSect, m_ammoTypes[LocalAmmoType].c_str());
+        Msg("! %s reload to %s", *l_cartridge.m_ammoSect, ammo_sect.c_str());
 #endif
-		l_cartridge.Load(m_ammoTypes[LocalAmmoType].c_str(), LocalAmmoType, m_APk);
-	}
+        l_cartridge.Load(ammo_sect.c_str(), LocalAmmoType, m_APk);
+    }
 }

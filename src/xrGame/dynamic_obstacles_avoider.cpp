@@ -16,16 +16,24 @@
 
 void dynamic_obstacles_avoider::query()
 {
-	ai().moving_objects().query_action_dynamic(
-		object().get_moving_object()
-	);
+	moving_object* object_to_query = object().get_moving_object();
+	if (!object_to_query)
+	{
+		m_current_iteration.clear();
+		return;
+	}
 
-	m_current_iteration.swap(object().get_moving_object()->dynamic_query());
+	ai().moving_objects().query_action_dynamic(object_to_query);
+	m_current_iteration.swap(object_to_query->dynamic_query());
 }
 
 bool dynamic_obstacles_avoider::movement_enabled() const
 {
-	switch (object().get_moving_object()->action())
+	moving_object* object_to_query = object().get_moving_object();
+	if (!object_to_query)
+		return true;
+
+	switch (object_to_query->action())
 	{
 	case moving_object::action_wait:
 		{

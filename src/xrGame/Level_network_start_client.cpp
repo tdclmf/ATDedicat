@@ -60,13 +60,46 @@ bool CLevel::net_start_client2()
 		LPCSTR level_ver = "";
 		LPCSTR download_url = "";
 
-		// Determine Map... Server will be created as single... Otherwise it's will be another default mode
+		// Determine map and version.
 		if (IsGameTypeSingle())
 		{
-			level_name = *name();
-			extern LPCSTR default_map_version;
-			level_ver = Server ? *Server->level_version(Server->GetConnectOptions()) : default_map_version;
-			download_url = "";
+			// Local host path: server is in the same process.
+			if (Server)
+			{
+				level_name = *name();
+				level_ver = *Server->level_version(Server->GetConnectOptions());
+				download_url = "";
+			}
+			else
+			{
+				// Dedicated/remote single path: trust server descriptor only.
+				GameDescriptionData const& descr = get_net_DescriptionData();
+				extern LPCSTR default_map_version;
+				const bool has_valid_server_map = descr.map_name[0] && (0 != xr_strcmp(descr.map_name, "all"));
+				const bool has_valid_server_version = descr.map_version[0];
+
+				if (!has_valid_server_map)
+				{
+					Disconnect();
+					deny_m_spawn = TRUE;
+					connected_to_server = FALSE;
+					Msg("! [NET_PROXY][MAP] Invalid server map in descriptor [%s], aborting client level load",
+					    descr.map_name);
+					return false;
+				}
+
+				level_name = descr.map_name;
+
+				if (has_valid_server_version)
+					level_ver = descr.map_version;
+				else
+					level_ver = default_map_version;
+
+				download_url = descr.download_url[0] ? descr.download_url : "";
+
+				Msg("* [NET_PROXY][MAP] Single client map source: server descriptor [%s][%s]",
+				    level_name ? level_name : "", level_ver ? level_ver : "");
+			}
 		} else {
 			level_name = get_net_DescriptionData().map_name;
 			level_ver = get_net_DescriptionData().map_version;

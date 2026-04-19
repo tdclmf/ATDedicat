@@ -302,7 +302,7 @@ void CEntityAlive::Hit(SHit* pHDS)
 	//-------------------------------------------
 	inherited::Hit(&HDS);
 
-	if (g_Alive()) // werasik2aa onserver
+	if (OnServer() && g_Alive())
 	{
 		CEntityAlive* EA = smart_cast<CEntityAlive*>(HDS.who);
 		if (EA && EA->g_Alive() && EA->ID() != ID())
@@ -320,7 +320,7 @@ void CEntityAlive::OnEvent(NET_Packet& P, u16 type)
 
 void CEntityAlive::Die(CObject* who)
 {
-	//if (OnServer()) // werasik2aa onserver
+	if (OnServer())
 		RELATION_REGISTRY().Action(smart_cast<CEntityAlive*>(who), this, RELATION_REGISTRY::KILL);
 	inherited::Die(who);
 
@@ -331,7 +331,7 @@ void CEntityAlive::Die(CObject* who)
 	{
 		NET_Packet P;
 		u_EventGen(P, GE_ASSIGN_KILLER, ID());
-		P.w_u16(u16(who->ID()));
+		P.w_u16(u16(who ? who->ID() : ID()));
 		u_EventSend(P);
 	}
 

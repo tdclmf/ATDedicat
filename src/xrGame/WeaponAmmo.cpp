@@ -25,6 +25,17 @@ CCartridge::CCartridge()
 
 void CCartridge::Load(LPCSTR section, u8 LocalAmmoType, float ap_mod)
 {
+	if (!section || !xr_strlen(section) || !pSettings->section_exist(section))
+	{
+		Msg("! [NET] CCartridge::Load skipped invalid ammo section [%s]", section ? section : "<null>");
+		m_ammoSect = "";
+		m_LocalAmmoType = LocalAmmoType;
+		param_s.Init();
+		m_flags.assign(cfTracer | cfRicochet);
+		m_InvShortName = NULL;
+		return;
+	}
+
 	m_ammoSect = section;
 	m_LocalAmmoType = LocalAmmoType;
 	param_s.kDist = pSettings->r_float(section, "k_dist");
@@ -77,7 +88,10 @@ void CCartridge::Load(LPCSTR section, u8 LocalAmmoType, float ap_mod)
 	VERIFY(u16(-1)!=bullet_material_idx);
 	VERIFY(param_s.fWallmarkSize>0);
 
-	m_InvShortName = CStringTable().translate(pSettings->r_string(section, "inv_name_short"));
+		if (pSettings->line_exist(section, "inv_name_short"))
+		m_InvShortName = CStringTable().translate(pSettings->r_string(section, "inv_name_short"));
+	else
+		m_InvShortName = NULL;
 }
 
 float CCartridge::Weight() const

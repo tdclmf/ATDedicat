@@ -106,10 +106,27 @@ void xrServer::AttachNewClient(IClient* CL)
 	msgConfig.sign1 = 0x12071980;
 	msgConfig.sign2 = 0x26111975;
 
-	// WERASIK2AA SYNC MAP DATA!
-	strncpy(msgConfig.mdata.map_name, *Level().name(), sizeof(msgConfig.mdata.map_name));
-	strncpy(msgConfig.mdata.map_version, *level_version(GetConnectOptions()), sizeof(msgConfig.mdata.map_version));
-	strncpy(msgConfig.mdata.download_url, "", sizeof(msgConfig.mdata.download_url));
+	// Authoritative map sync payload for client startup.
+	// Prefer currently loaded level data over startup connect options.
+	shared_str map_name = Level().GetMapData().m_name;
+	shared_str map_version = Level().GetMapData().m_map_version;
+
+	if (!map_name.size() || (0 == xr_strcmp(*map_name, "all")))
+		map_name = level_name(GetConnectOptions());
+	if (!map_name.size() || (0 == xr_strcmp(*map_name, "all")))
+		map_name = Level().name();
+	if (!map_version.size())
+		map_version = level_version(GetConnectOptions());
+
+	shared_str download_url = get_map_download_url(*map_name, *map_version);
+	Msg("* [NET_PROXY][MAP] AttachNewClient payload [%s][%s]", *map_name, *map_version);
+
+	strncpy(msgConfig.mdata.map_name, *map_name, sizeof(msgConfig.mdata.map_name));
+	msgConfig.mdata.map_name[sizeof(msgConfig.mdata.map_name) - 1] = 0;
+	strncpy(msgConfig.mdata.map_version, *map_version, sizeof(msgConfig.mdata.map_version));
+	msgConfig.mdata.map_version[sizeof(msgConfig.mdata.map_version) - 1] = 0;
+	strncpy(msgConfig.mdata.download_url, *download_url, sizeof(msgConfig.mdata.download_url));
+	msgConfig.mdata.download_url[sizeof(msgConfig.mdata.download_url) - 1] = 0;
 
 
 	SendTo_LL(CL->ID, &msgConfig, sizeof(msgConfig), net_flags(TRUE, TRUE, TRUE, TRUE));

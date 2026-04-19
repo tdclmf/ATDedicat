@@ -22,6 +22,7 @@
 #include "script_engine_space.h"
 #include "script_process.h"
 #include "xrServer_Objects.h"
+#include "xrServer_Objects_ALife_Monsters.h"
 #include "ui/UIMainIngameWnd.h"
 //#include "../xrphysics/PhysicsGamePars.h"
 #include "../xrphysics/iphworld.h"
@@ -104,7 +105,7 @@ extern float f_power_loss_bias;
 extern float f_power_loss_factor;
 BOOL precise_catspaw_dotmarks = false;
 BOOL enable_actortorch_volumetric = true;
-ENGINE_API BOOL g_wpn_trace = TRUE;
+ENGINE_API BOOL g_wpn_trace = FALSE;
 //extern  BOOL	g_old_style_ui_hud;
 
 extern float g_smart_cover_factor;

@@ -557,14 +557,18 @@ void CCustomZone::UpdateWorkload(u32 dt)
 
 	if (Level().CurrentEntity())
 	{
-		Fvector P = Level().CurrentControlEntity()->Position();
-		P.y -= 0.9f;
-		float radius = 1.0f;
-		CalcDistanceTo(P, m_fDistanceToCurEntity, radius);
-
-		if (m_actor_effector)
+		CObject* control_entity = Level().CurrentControlEntity();
+		if (control_entity)
 		{
-			m_actor_effector->Update(m_fDistanceToCurEntity, radius, m_eHitTypeBlowout);
+			Fvector P = control_entity->Position();
+			P.y -= 0.9f;
+			float radius = 1.0f;
+			CalcDistanceTo(P, m_fDistanceToCurEntity, radius);
+
+			if (m_actor_effector)
+			{
+				m_actor_effector->Update(m_fDistanceToCurEntity, radius, m_eHitTypeBlowout);
+			}
 		}
 	}
 
@@ -592,6 +596,13 @@ void CCustomZone::shedule_Update(u32 dt)
 
 	if (IsEnabled())
 	{
+		if (!CFORM())
+		{
+			inherited::shedule_Update(dt);
+			UpdateOnOffState();
+			return;
+		}
+
 		const Fsphere& s = CFORM()->getSphere();
 		Fvector P;
 		XFORM().transform_tiny(P, s.P);
@@ -644,7 +655,8 @@ void CCustomZone::shedule_Update(u32 dt)
 		inherited::shedule_Update(dt);
 
 		// check "fast-mode" border
-		float act_distance = Level().CurrentControlEntity()->Position().distance_to(P) - s.R;
+		CObject* control_entity = Level().CurrentControlEntity();
+		float act_distance = control_entity ? (control_entity->Position().distance_to(P) - s.R) : flt_max;
 		if (act_distance > FASTMODE_DISTANCE && !m_zone_flags.test(eAlwaysFastmode))
 			o_switch_2_slow();
 		else
@@ -653,7 +665,7 @@ void CCustomZone::shedule_Update(u32 dt)
 		if (!m_zone_flags.test(eFastMode))
 			UpdateWorkload(dt);
 
-		if (act_distance < ps_ssfx_int_grass_params_1.w)
+		if (control_entity && act_distance < ps_ssfx_int_grass_params_1.w)
 			GrassZoneUpdate();
 		else
 		{

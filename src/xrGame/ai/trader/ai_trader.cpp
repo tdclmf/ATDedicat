@@ -156,10 +156,6 @@ void CAI_Trader::net_Import(NET_Packet& P)
 {
 	R_ASSERT(Remote());
 
-	float fDummy;
-	P.r_float(fDummy);
-	set_money(P.r_u32(), false);
-
 	setVisible(TRUE);
 	setEnabled(TRUE);
 }
@@ -403,3 +399,4 @@ void CAI_Trader::dialog_sound_stop()
 {
 	animation().external_sound_stop();
 }
+

@@ -418,6 +418,8 @@ void CInventoryOwner::SetCommunity(CHARACTER_COMMUNITY_INDEX new_community)
 {
 	CEntityAlive* EA = smart_cast<CEntityAlive*>(this);
 	VERIFY(EA);
+	if (!ai().get_alife())
+		return;
 
 	CSE_Abstract* e_entity = ai().alife().objects().object(EA->ID(), false);
 	if (!e_entity) return;
@@ -433,14 +435,19 @@ void CInventoryOwner::SetCommunity(CHARACTER_COMMUNITY_INDEX new_community)
 	//	EA->id_Team = CharacterInfo().Community().team();
 	trader->m_community_index = new_community;
 
-	if (EA->ID() == Actor()->ID())
-		Actor()->RPC_UpdateFaction();
+	if (CActor* actor = Actor())
+	{
+		if (EA->ID() == actor->ID())
+			actor->RPC_UpdateFaction();
+	}
 }
 
 void CInventoryOwner::SetRank(CHARACTER_RANK_VALUE rank)
 {
 	CEntityAlive* EA = smart_cast<CEntityAlive*>(this);
 	VERIFY(EA);
+	if (!ai().get_alife())
+		return;
 	CSE_Abstract* e_entity = ai().alife().objects().object(EA->ID(), false);
 	if (!e_entity) return;
 	CSE_ALifeTraderAbstract* trader = smart_cast<CSE_ALifeTraderAbstract*>(e_entity);
@@ -449,8 +456,11 @@ void CInventoryOwner::SetRank(CHARACTER_RANK_VALUE rank)
 	CharacterInfo().m_CurrentRank.set(rank);
 	trader->m_rank = rank;
 
-	if (EA->ID() == Actor()->ID())
-		Actor()->RPC_UpdateRank();
+	if (CActor* actor = Actor())
+	{
+		if (EA->ID() == actor->ID())
+			actor->RPC_UpdateRank();
+	}
 }
 
 void CInventoryOwner::ChangeRank(CHARACTER_RANK_VALUE delta)
@@ -462,6 +472,8 @@ void CInventoryOwner::SetReputation(CHARACTER_REPUTATION_VALUE reputation)
 {
 	CEntityAlive* EA = smart_cast<CEntityAlive*>(this);
 	VERIFY(EA);
+	if (!ai().get_alife())
+		return;
 	CSE_Abstract* e_entity = ai().alife().objects().object(EA->ID(), false);
 	if (!e_entity) return;
 
@@ -471,8 +483,11 @@ void CInventoryOwner::SetReputation(CHARACTER_REPUTATION_VALUE reputation)
 	CharacterInfo().m_CurrentReputation.set(reputation);
 	trader->m_reputation = reputation;
 
-	if (EA->ID() == Actor()->ID())
-		Actor()->RPC_UpdateReputation();
+	if (CActor* actor = Actor())
+	{
+		if (EA->ID() == actor->ID())
+			actor->RPC_UpdateReputation();
+	}
 }
 
 void CInventoryOwner::ChangeReputation(CHARACTER_REPUTATION_VALUE delta)

@@ -82,6 +82,7 @@ public:
 	IC CGroupHierarchyHolder(CSquadHierarchyHolder* squad);
 	virtual ~CGroupHierarchyHolder();
 	IC CAgentManager& agent_manager() const;
+	IC bool has_agent_manager() const;
 	IC const MEMBER_REGISTRY& members() const;
 	void register_member(CEntity* member);
 	void unregister_member(CEntity* member);

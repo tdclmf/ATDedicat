@@ -21,22 +21,28 @@ const CAI_Stalker& static_obstacles_avoider::object() const
 
 void static_obstacles_avoider::query(const Fvector& start_position, const Fvector& dest_position)
 {
-	ai().moving_objects().query_action_static(
-		object().get_moving_object(),
-		start_position,
-		dest_position
-	);
+	moving_object* object_to_query = object().get_moving_object();
+	if (!object_to_query)
+	{
+		m_current_iteration.clear();
+		return;
+	}
 
-	m_current_iteration.swap(object().get_moving_object()->static_query());
+	ai().moving_objects().query_action_static(object_to_query, start_position, dest_position);
+	m_current_iteration.swap(object_to_query->static_query());
 }
 
 void static_obstacles_avoider::query()
 {
-	ai().moving_objects().query_action_static(
-		object().get_moving_object()
-	);
+	moving_object* object_to_query = object().get_moving_object();
+	if (!object_to_query)
+	{
+		m_current_iteration.clear();
+		return;
+	}
 
-	m_current_iteration.swap(object().get_moving_object()->static_query());
+	ai().moving_objects().query_action_static(object_to_query);
+	m_current_iteration.swap(object_to_query->static_query());
 }
 
 bool static_obstacles_avoider::new_obstacles_found() const

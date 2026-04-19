@@ -324,7 +324,8 @@ void CAI_Stalker::Hit(SHit* pHDS)
 
 		if (!already_critically_wounded)
 		{
-			const CCoverPoint* cover = agent_manager().member().member(this).cover();
+			CMemberOrder* member_order = agent_manager().member().get_member(ID());
+			const CCoverPoint* cover = member_order ? member_order->cover() : nullptr;
 			if (!invulnerable() && cover && HDS.initiator() &&
 				(HDS.initiator()->ID() != ID()) && !fis_zero(HDS.damage()) && brain().affect_cover())
 			{
@@ -964,6 +965,9 @@ void CAI_Stalker::notify_on_wounded_or_killed(CObject* object)
 
 	stalker->on_enemy_wounded_or_killed(this);
 
+	if (!agent_manager().member().get_member(ID()))
+		return;
+
 	typedef CAgentCorpseManager::MEMBER_CORPSES MEMBER_CORPSES;
 
 	const MEMBER_CORPSES& corpses = agent_manager().corpse().corpses();
@@ -1006,6 +1010,9 @@ void CAI_Stalker::wounded(bool value)
 		return;
 
 	character_physics_support()->movement()->DestroyCharacter();
+
+	if (!agent_manager().member().get_member(ID()))
+		return;
 
 	if (!agent_manager().member().registered_in_combat(this))
 		return;
@@ -1206,7 +1213,8 @@ void CAI_Stalker::update_throw_params()
 
 void CAI_Stalker::on_throw_completed()
 {
-	agent_manager().member().on_throw_completed();
+	if (agent_manager().member().get_member(ID()))
+		agent_manager().member().on_throw_completed();
 	m_last_throw_time = Device.dwTimeGlobal;
 }
 
@@ -1248,6 +1256,9 @@ bool CAI_Stalker::critical_wound_external_conditions_suitable()
 	default:
 		return (false);
 	}
+
+	if (!agent_manager().member().get_member(ID()))
+		return (false);
 
 	if (!agent_manager().member().registered_in_combat(this))
 		return (false);
@@ -1293,6 +1304,10 @@ bool CAI_Stalker::can_cry_enemy_is_wounded() const
 		return (false);
 
 	if (brain().current_action_id() != StalkerDecisionSpace::eWorldOperatorCombatPlanner)
+		return (false);
+
+	CMemberOrder* member_order = agent_manager().member().get_member(ID());
+	if (!member_order)
 		return (false);
 
 	if (!agent_manager().member().group_behaviour())

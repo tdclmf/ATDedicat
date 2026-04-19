@@ -381,6 +381,21 @@ void game_sv_Single::remove_all_restrictions(NET_Packet& packet, u16 id)
 
 void game_sv_Single::sls_default()
 {
+	static u32 s_next_diag_log_time = 0;
+	if (g_dedicated_server && Device.dwTimeGlobal >= s_next_diag_log_time)
+	{
+		CSE_ALifeCreatureActor* actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
+		IClient* server_client = server().GetServerClient();
+		Msg("* [SV_ALIFE_DIAG] players=%u server_client=%u actor_id=%u actor=[%s] actor_graph=%u actor_node=%u",
+			get_players_count(),
+			server_client ? server_client->ID.value() : 0,
+			actor ? actor->ID : u16(-1),
+			(actor && actor->name_replace()) ? actor->name_replace() : "<none>",
+			actor ? actor->m_tGraphID : u32(-1),
+			actor ? actor->m_tNodeID : u32(-1));
+		s_next_diag_log_time = Device.dwTimeGlobal + 5000;
+	}
+
 	alife().update_switch();
 }
 
@@ -545,7 +560,10 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 	}
 
 	xrCData->ps->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
-	Msg("--- [SV] Client [%s] finished connecting. Spawning mp_actor...", xrCData->name.c_str());
+	Msg("--- [SV] Client [%s] finished connecting. Spawning mp_actor... players=%u server_client=%u",
+		xrCData->name.c_str(),
+		get_players_count(),
+		server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
 	OnPlayerReady(id_who);
 
 	NET_Packet P;
@@ -565,6 +583,13 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 		xrClientData* xrCData = server().ID_to_client(id);
 		if (!xrCData || !xrCData->ps)
 			return;
+
+		Msg("--- [SV] OnPlayerReady entry for [%s]: id=%u owner=%u players=%u server_client=%u",
+			xrCData->name.c_str(),
+			id.value(),
+			xrCData->owner ? xrCData->owner->ID : u16(-1),
+			get_players_count(),
+			server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
 
 		game_PlayerState* ps = xrCData->ps;
 		if (g_dedicated_server && xrCData == server().GetServerClient())

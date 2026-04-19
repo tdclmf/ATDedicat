@@ -15,6 +15,8 @@
 // Зрение, слух, вероятность победы, выгодность противника
 void CBaseMonster::UpdateMemory()
 {
+	if (getDestroy())
+		return;
 	// Обновить память
 	EnemyMemory.update();
 	SoundMemory.UpdateHearing();

@@ -30,7 +30,8 @@ void CMonsterEnemyMemory::init_external(CBaseMonster* M, TTime mem_time)
 
 void CMonsterEnemyMemory::update()
 {
-	VERIFY(monster->g_Alive());
+	if (!monster || !monster->g_Alive() || monster->getDestroy())
+		return;
 
 	CMonsterHitMemory& monster_hit_memory = monster->HitMemory;
 
@@ -52,15 +53,18 @@ void CMonsterEnemyMemory::update()
 				bool const self_is_dog = !!smart_cast<const CAI_Dog*>(monster);
 				if (self_is_dog)
 				{
-					CMonsterSquad* const squad = monster_squad().get_squad(monster);
-					squad->set_home_in_danger();
+					if (CMonsterSquad* const squad = monster_squad().get_squad(monster))
+						squad->set_home_in_danger();
 				}
 			}
 		}
 	}
 
-	if (monster->SoundMemory.IsRememberSound() && Actor()
-		&& Actor()->memory().visual().visible_now(monster))
+	CActor* actor = OnClient() ? Actor() : nullptr;
+	if (actor && (actor->getDestroy() || !actor->g_Alive()))
+		actor = nullptr;
+	if (monster->SoundMemory.IsRememberSound() && actor
+		&& actor->memory().visual().visible_now(monster))
 	{
 		SoundElem sound;
 		bool dangerous;
@@ -81,8 +85,8 @@ void CMonsterEnemyMemory::update()
 					bool const self_is_dog = !!smart_cast<const CAI_Dog*>(monster);
 					if (self_is_dog)
 					{
-						CMonsterSquad* const squad = monster_squad().get_squad(monster);
-						squad->set_home_in_danger();
+						if (CMonsterSquad* const squad = monster_squad().get_squad(monster))
+							squad->set_home_in_danger();
 					}
 				}
 			}
@@ -94,6 +98,9 @@ void CMonsterEnemyMemory::update()
 	     ++I)
 	{
 		const CEntityAlive* enemy = *I;
+		if (!enemy || enemy->getDestroy())
+			continue;
+
 		const bool feel_enemy = monster->Position().distance_to(enemy->Position())
 			<
 			monster->get_feel_enemy_max_distance();
@@ -103,17 +110,17 @@ void CMonsterEnemyMemory::update()
 	}
 
 	float const feel_enemy_max_distance = monster->get_feel_enemy_max_distance();
-	if (Actor())
+	if (actor)
 	{
-		float const xz_dist = monster->Position().distance_to_xz(Actor()->Position());
-		float const y_dist = _abs(monster->Position().y - Actor()->Position().y);
+		float const xz_dist = monster->Position().distance_to_xz(actor->Position());
+		float const y_dist = _abs(monster->Position().y - actor->Position().y);
 
 		if (xz_dist < feel_enemy_max_distance &&
 			y_dist < 10 &&
-			monster->memory().enemy().is_useful(Actor()) &&
-			Actor()->memory().visual().visible_now(monster))
+			monster->memory().enemy().is_useful(actor) &&
+			actor->memory().visual().visible_now(monster))
 		{
-			add_enemy(Actor());
+			add_enemy(actor);
 		}
 	}
 

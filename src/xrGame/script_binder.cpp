@@ -16,6 +16,31 @@
 #include "gameobject.h"
 #include "level.h"
 
+namespace
+{
+	static u32 g_binder_diag_budget = 512;
+
+	IC bool binder_diag_allow_log()
+	{
+		if (!g_binder_diag_budget)
+			return false;
+
+		--g_binder_diag_budget;
+		return true;
+	}
+
+	IC LPCSTR binder_section_script_binding(LPCSTR section)
+	{
+		if (!section || !*section || !pSettings || !pSettings->section_exist(section))
+			return "";
+
+		if (!pSettings->line_exist(section, "script_binding"))
+			return "";
+
+		return pSettings->r_string(section, "script_binding");
+	}
+}
+
 // comment next string when commiting
 //#define DBG_DISABLE_SCRIPTS
 
@@ -110,6 +135,15 @@ void CScriptBinder::reload(LPCSTR section)
 		return;
 	}
 
+	if (!m_object && game_object && binder_diag_allow_log())
+	{
+		Msg("! [BINDER] reload produced no binder object for [%s][%u] section=[%s] binding=[%s].",
+			game_object->cName().c_str(),
+			game_object->ID(),
+			*game_object->cNameSect(),
+			pSettings->r_string(section, "script_binding"));
+	}
+
 	if (m_object)
 	{
 		try
@@ -144,7 +178,24 @@ BOOL CScriptBinder::net_Spawn(CSE_Abstract* DC)
 	{
 		try
 		{
-			return m_object->net_Spawn(object);
+			const bool spawn_ok = m_object->net_Spawn(object);
+			if (!spawn_ok && OnClient() && !OnServer())
+			{
+				CGameObject* game_object = smart_cast<CGameObject*>(this);
+				const LPCSTR section = game_object ? *game_object->cNameSect() : "";
+				const LPCSTR binding = binder_section_script_binding(section);
+				if (game_object && binder_diag_allow_log())
+				{
+					Msg("! [CL] Binder net_spawn rejected [%s][%u] section=[%s] binding=[%s] on_client=%d on_server=%d.",
+						game_object->cName().c_str(),
+						game_object->ID(),
+						section,
+						binding && *binding ? binding : "<none>",
+						(int)OnClient(),
+						(int)OnServer());
+				}
+			}
+			return (spawn_ok ? TRUE : FALSE);
 		}
 		catch (...)
 		{

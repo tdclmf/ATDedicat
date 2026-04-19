@@ -118,4 +118,30 @@ void LevelMapSyncData::ReceiveServerMapSync(NET_Packet& P)
 		invalid_geom_checksum = true;
 	else if (server_resp == YouHaveOtherMap)
 		invalid_map_or_version = true;
+
+	// Optional authoritative payload from server (new protocol extension).
+	// Keep backward compatibility with old packets that only contain response byte.
+	if (!P.r_eof())
+	{
+		shared_str server_map_name;
+		shared_str server_map_version;
+		shared_str server_download_url;
+		P.r_stringZ(server_map_name);
+		if (!P.r_eof())
+			P.r_stringZ(server_map_version);
+		if (!P.r_eof())
+			P.r_stringZ(server_download_url);
+		if (!P.r_eof())
+			P.r_u32(m_level_geom_crc32);
+
+		if (server_map_name.size())
+			m_name = server_map_name;
+		if (server_map_version.size())
+			m_map_version = server_map_version;
+		if (server_download_url.size())
+			m_map_download_url = server_download_url;
+
+		Msg("* [NET_PROXY][MAP] Server authoritative map [%s][%s]",
+		    m_name.size() ? *m_name : "", m_map_version.size() ? *m_map_version : "");
+	}
 }

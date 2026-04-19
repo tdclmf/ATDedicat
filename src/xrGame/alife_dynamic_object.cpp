@@ -17,6 +17,35 @@
 #include "game_graph.h"
 #include "xrServer.h"
 
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+	static u32 g_alife_switch_diag_budget = 400;
+
+	IC bool alife_switch_diag_allow_log()
+	{
+		if (!g_alife_switch_diag_budget)
+			return false;
+
+		--g_alife_switch_diag_budget;
+		return true;
+	}
+
+	IC bool alife_switch_has_valid_actor(const CSE_ALifeCreatureActor* actor)
+	{
+		if (!actor)
+			return false;
+
+		// Dedicated-single bridge keeps a temporary system actor (id=0) on server.
+		// It is not a valid spatial anchor for online/offline distance switching.
+		if (g_dedicated_server && actor->ID == 0)
+			return false;
+
+		return true;
+	}
+}
+
 void CSE_ALifeDynamicObject::on_spawn()
 {
 #ifdef DEBUG
@@ -153,7 +182,11 @@ void CSE_ALifeDynamicObject::try_switch_online()
 		return;
 	}
 
-	if (alife().graph().actor()->o_Position.distance_to(o_Position) > alife().online_distance())
+	CSE_ALifeCreatureActor* actor = alife().graph().actor();
+	if (!alife_switch_has_valid_actor(actor))
+		return;
+
+	if (actor->o_Position.distance_to(o_Position) > alife().online_distance())
 	{
 		on_failed_switch_online();
 		return;
@@ -167,15 +200,74 @@ void CSE_ALifeDynamicObject::try_switch_offline()
 	if (!can_switch_offline())
 		return;
 
+	if (g_dedicated_server && ID == 0)
+	{
+		if (alife_switch_diag_allow_log())
+		{
+			Msg("* [ALIFE_SW][OFFLINE_SKIP] id=%u name=[%s] reason=system_actor_id0 parent=%u graph=%u node=%u",
+				ID,
+				name_replace(),
+				ID_Parent,
+				m_tGraphID,
+				m_tNodeID);
+		}
+		return;
+	}
+
+	CSE_ALifeCreatureActor* actor = alife().graph().actor();
+	if (!alife_switch_has_valid_actor(actor))
+	{
+		if (alife_switch_diag_allow_log())
+		{
+			Msg("* [ALIFE_SW][OFFLINE_SKIP] id=%u name=[%s] reason=no_valid_actor actor_id=%u actor=[%s] parent=%u graph=%u node=%u",
+				ID,
+				name_replace(),
+				actor ? actor->ID : u16(-1),
+				actor ? actor->name_replace() : "",
+				ID_Parent,
+				m_tGraphID,
+				m_tNodeID);
+		}
+		return;
+	}
+	const float distance_to_actor = actor->o_Position.distance_to(o_Position);
+	const float offline_distance = alife().offline_distance();
+
 	if (!can_switch_online())
 	{
+		if (alife_switch_diag_allow_log())
+		{
+			Msg("* [ALIFE_SW][OFFLINE_REQ] id=%u name=[%s] reason=cannot_online dist=%.2f off=%.2f actor_id=%u actor=[%s] parent=%u graph=%u node=%u",
+				ID,
+				name_replace(),
+				distance_to_actor,
+				offline_distance,
+				actor->ID,
+				actor->name_replace(),
+				ID_Parent,
+				m_tGraphID,
+				m_tNodeID);
+		}
 		alife().switch_offline(this);
 		return;
 	}
 
-	if (alife().graph().actor()->o_Position.distance_to(o_Position) <= alife().offline_distance())
+	if (distance_to_actor <= offline_distance)
 		return;
 
+	if (alife_switch_diag_allow_log())
+	{
+		Msg("* [ALIFE_SW][OFFLINE_REQ] id=%u name=[%s] reason=distance dist=%.2f off=%.2f actor_id=%u actor=[%s] parent=%u graph=%u node=%u",
+			ID,
+			name_replace(),
+			distance_to_actor,
+			offline_distance,
+			actor->ID,
+			actor->name_replace(),
+			ID_Parent,
+			m_tGraphID,
+			m_tNodeID);
+	}
 	alife().switch_offline(this);
 }
 

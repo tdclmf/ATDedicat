@@ -325,11 +325,25 @@ void CWeaponShotgun::net_Import(NET_Packet& P)
 	{
 		u8 LocalAmmoType = P.r_u8();
 		if (i >= m_magazine.size()) continue;
+		if (LocalAmmoType >= m_ammoTypes.size())
+		{
+			Msg("! [NET] CWeaponShotgun::net_Import invalid LocalAmmoType=%u (types=%u) for [%s]",
+				LocalAmmoType, (u32)m_ammoTypes.size(), cName().c_str());
+			continue;
+		}
+
 		CCartridge& l_cartridge = *(m_magazine.begin() + i);
 		if (LocalAmmoType == l_cartridge.m_LocalAmmoType) continue;
+		LPCSTR ammo_section = m_ammoTypes[LocalAmmoType].c_str();
+		if (!ammo_section || !xr_strlen(ammo_section) || !pSettings->section_exist(ammo_section))
+		{
+			Msg("! [NET] CWeaponShotgun::net_Import invalid ammo section [%s] for [%s]",
+				ammo_section ? ammo_section : "<null>", cName().c_str());
+			continue;
+		}
 #ifdef DEBUG
-		Msg("! %s reload to %s", *l_cartridge.m_ammoSect, m_ammoTypes[LocalAmmoType].c_str());
+		Msg("! %s reload to %s", *l_cartridge.m_ammoSect, ammo_section);
 #endif
-		l_cartridge.Load(m_ammoTypes[LocalAmmoType].c_str(), LocalAmmoType, m_APk);
+		l_cartridge.Load(ammo_section, LocalAmmoType, m_APk);
 	}
 }

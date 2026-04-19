@@ -486,6 +486,9 @@ bool CMonsterHome::at_mid_home(const Fvector& pos)
 
 bool CMonsterHome::at_home(const Fvector& pos, float const radius)
 {
+	if (!ai().get_level_graph())
+		return true;
+
 	if (!m_path)
 	{
 		if (!ai().level_graph().valid_vertex_id(m_level_vertex_id))
@@ -533,6 +536,9 @@ void CMonsterHome::set_move_dists(u32 min_dist, u32 max_dist)
 
 Fvector CMonsterHome::get_home_point()
 {
+	if (!ai().get_level_graph())
+		return (m_object->Position());
+
 	if (!m_path)
 	{
 		if (ai().level_graph().valid_vertex_id(m_level_vertex_id))

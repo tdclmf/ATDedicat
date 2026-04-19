@@ -29,7 +29,9 @@
 void CBaseMonster::feel_sound_new(CObject* who, int eType, CSound_UserDataPtr user_data, const Fvector& Position,
                                   float power)
 {
-	if (!g_Alive()) return;
+	if (!g_Alive() || getDestroy()) return;
+	if (!who || who->getDestroy()) return;
+	if (!m_current_settings || !(*m_current_settings)) return;
 
 	// ignore my sounds
 	if (this == who) return;
@@ -238,7 +240,8 @@ void CBaseMonster::HitSignal(float amount, Fvector& vLocalDir, CObject* who, s16
 {
 	if (!g_Alive()) return;
 
-	feel_sound_new(who, SOUND_TYPE_WEAPON_SHOOTING, 0, who->Position(), 1.f);
+	if (who && !who->getDestroy())
+		feel_sound_new(who, SOUND_TYPE_WEAPON_SHOOTING, 0, who->Position(), 1.f);
 	if (g_Alive()) sound().play(MonsterSound::eMonsterSoundTakeDamage);
 
 	if (element < 0) return;
@@ -256,21 +259,26 @@ void CBaseMonster::HitSignal(float amount, Fvector& vLocalDir, CObject* who, s16
 
 	anim().FX_Play(hit_side, 1.0f);
 
-	HitMemory.add_hit(who, hit_side);
+	if (who && !who->getDestroy())
+		HitMemory.add_hit(who, hit_side);
 
 	Morale.on_hit();
 
-	callback(GameObject::eHit)(
-		lua_game_object(),
-		amount,
-		vLocalDir,
-		smart_cast<const CGameObject*>(who)->lua_game_object(),
-		element
-	);
+	const CGameObject* who_game_object = smart_cast<const CGameObject*>(who);
+	if (who_game_object)
+	{
+		callback(GameObject::eHit)(
+			lua_game_object(),
+			amount,
+			vLocalDir,
+			who_game_object->lua_game_object(),
+			element
+		);
+	}
 
 	// если нейтрал - добавить как врага
 	CEntityAlive* obj = smart_cast<CEntityAlive*>(who);
-	if (obj && (tfGetRelationType(obj) == ALife::eRelationTypeNeutral)) EnemyMan.add_enemy(obj);
+	if (obj && !obj->getDestroy() && (tfGetRelationType(obj) == ALife::eRelationTypeNeutral)) EnemyMan.add_enemy(obj);
 }
 
 void CBaseMonster::SetAttackEffector()

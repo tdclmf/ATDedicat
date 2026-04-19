@@ -14,6 +14,9 @@
 
 #include "mp_logging.h"
 #include "xr_collide_form.h"
+#include <unordered_map>
+
+extern ENGINE_API bool g_dedicated_server;
 
 #pragma warning(push)
 #pragma warning(disable:4995)
@@ -29,6 +32,105 @@ inline void CObjectList::o_crow(CObject* O)
 	crows.push_back(O);
 
 	O->dwFrame_AsCrow = Device.dwFrame;
+}
+
+namespace
+{
+	struct SCrowActorsCache
+	{
+		u32 frame_id = u32(-1);
+		xr_vector<Fvector> actor_positions;
+	};
+
+	SCrowActorsCache g_crow_actors_cache;
+	std::unordered_map<u16, u32> g_crow_last_log_time;
+
+	IC void crow_trace_to_crow(CObject* object, LPCSTR where, LPCSTR reason, float dist_sqr = -1.f)
+	{
+		if (!object)
+			return;
+
+		const u32 now = Device.dwTimeGlobal;
+		u32& last = g_crow_last_log_time[object->ID()];
+		if (last && (now - last) < 2000)
+			return;
+		last = now;
+
+		const float dist = (dist_sqr >= 0.f) ? _sqrt(dist_sqr) : -1.f;
+		if (dist >= 0.f)
+		{
+			//Msg("* [CROW_TRACE] id=%u name=%s -> CROW where=%s reason=%s dist=%.2f pos=(%.2f %.2f %.2f)",
+				//object->ID(), object->cName().c_str(), where ? where : "?", reason ? reason : "?", dist,
+				//object->Position().x, object->Position().y, object->Position().z);
+		}
+		else
+		{
+			//Msg("* [CROW_TRACE] id=%u name=%s -> CROW where=%s reason=%s pos=(%.2f %.2f %.2f)",
+				//object->ID(), object->cName().c_str(), where ? where : "?", reason ? reason : "?",
+				//object->Position().x, object->Position().y, object->Position().z);
+		}
+	}
+
+	IC void make_me_crow_traced(CObject* object, LPCSTR where, LPCSTR reason, float dist_sqr = -1.f)
+	{
+		if (!object)
+			return;
+
+		const bool was_crow = object->AmICrow();
+		object->MakeMeCrow();
+		if (!was_crow && object->AmICrow())
+			crow_trace_to_crow(object, where, reason, dist_sqr);
+	}
+
+	float crow_distance_to_nearest_actor_sqr(const Fvector& object_position)
+	{
+		float best_distance = FLT_MAX;
+		bool has_reference = false;
+		if (!g_dedicated_server)
+		{
+			best_distance = Device.vCameraPosition.distance_to_sqr(object_position);
+			has_reference = true;
+		}
+
+		if (!g_pGameLevel)
+			return best_distance;
+
+		if (g_crow_actors_cache.frame_id != Device.dwFrame)
+		{
+			g_crow_actors_cache.frame_id = Device.dwFrame;
+			g_crow_actors_cache.actor_positions.clear();
+
+			const u32 object_count = g_pGameLevel->Objects.o_count();
+			for (u32 i = 0; i < object_count; ++i)
+			{
+				CObject* object = g_pGameLevel->Objects.o_get_by_iterator(i);
+				if (!object || object->getDestroy() || !object->getEnabled())
+					continue;
+
+				if (!object->cast_actor())
+					continue;
+
+				// Dedicated single uses an invisible system db.actor with id=0.
+				// It should not affect crow distance for world activity selection.
+				if (g_dedicated_server && object->ID() == 0)
+					continue;
+
+				g_crow_actors_cache.actor_positions.push_back(object->Position());
+			}
+		}
+
+		const u32 actor_count = static_cast<u32>(g_crow_actors_cache.actor_positions.size());
+		for (u32 i = 0; i < actor_count; ++i)
+		{
+			const float actor_distance =
+				g_crow_actors_cache.actor_positions[i].distance_to_sqr(object_position);
+			if (actor_distance < best_distance)
+				best_distance = actor_distance;
+			has_reference = true;
+		}
+
+		return has_reference ? best_distance : FLT_MAX;
+	}
 }
 
 void CObject::MakeMeCrow()
@@ -352,18 +454,19 @@ void CObject::UpdateCL()
 	spatial_update(base_spu_epsP * 5, base_spu_epsR * 5);
 
 	// crow
-	if (Parent == g_pGameLevel->CurrentViewEntity())
-		MakeMeCrow();
+	CObject* const view_entity = g_pGameLevel ? g_pGameLevel->CurrentViewEntity() : nullptr;
+	if (view_entity && (Parent == view_entity))
+		make_me_crow_traced(this, "CObject::UpdateCL", "parent_is_current_view_entity");
 	else if (AlwaysTheCrow())
-		MakeMeCrow();
+		make_me_crow_traced(this, "CObject::UpdateCL", "AlwaysTheCrow()");
 	else
 	{
-		float dist = Device.vCameraPosition.distance_to_sqr(Position());
+		const float dist = crow_distance_to_nearest_actor_sqr(Position());
 		if (dist < CROW_RADIUS * CROW_RADIUS)
-			MakeMeCrow();
+			make_me_crow_traced(this, "CObject::UpdateCL", "nearest_actor_distance<CROW_RADIUS", dist);
 		else if ((Visual() && Visual()->getVisData().hom_frame + 2 > Device.dwFrame) && (dist < CROW_RADIUS2 *
 			CROW_RADIUS2))
-			MakeMeCrow();
+			make_me_crow_traced(this, "CObject::UpdateCL", "hom_recent && nearest_actor_distance<CROW_RADIUS2", dist);
 	}
 }
 
@@ -375,12 +478,17 @@ void CObject::shedule_Update(u32 T)
 	spatial_update(base_spu_epsP * 1, base_spu_epsR * 1);
 
 	// Always make me crow on shedule-update
-	// Makes sure that update-cl called at least with freq of shedule-update
-	MakeMeCrow();
-	/*
-	if (AlwaysTheCrow()) MakeMeCrow ();
-	else if (Device.vCameraPosition.distance_to_sqr(Position()) < CROW_RADIUS*CROW_RADIUS) MakeMeCrow ();
-	*/
+	// Keepalive is distance-limited to avoid global CROW<->ACTIVE flapping.
+	if (AlwaysTheCrow())
+	{
+		make_me_crow_traced(this, "CObject::shedule_Update", "AlwaysTheCrow()");
+	}
+	else
+	{
+		const float dist = crow_distance_to_nearest_actor_sqr(Position());
+		if (dist < CROW_RADIUS2 * CROW_RADIUS2)
+			make_me_crow_traced(this, "CObject::shedule_Update", "nearest_actor_distance<CROW_RADIUS2", dist);
+	}
 }
 
 void CObject::spatial_register()
@@ -410,7 +518,7 @@ CObject::SavedPosition CObject::ps_Element(u32 ID) const
 
 void CObject::renderable_Render()
 {
-	MakeMeCrow();
+	make_me_crow_traced(this, "CObject::renderable_Render", "renderable_render");
 }
 
 CObject* CObject::H_SetParent(CObject* new_parent, bool just_before_destroy)
@@ -430,7 +538,7 @@ CObject* CObject::H_SetParent(CObject* new_parent, bool just_before_destroy)
 	if (0 == old_parent) OnH_A_Chield(); // after attach
 	else OnH_A_Independent(); // after detach
 	// if (Parent) Parent->H_ChildAdd (this);
-	MakeMeCrow();
+	make_me_crow_traced(this, "CObject::H_SetParent", "parent_changed");
 	return old_parent;
 }
 

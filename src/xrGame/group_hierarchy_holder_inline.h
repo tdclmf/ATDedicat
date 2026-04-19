@@ -32,6 +32,11 @@ IC CAgentManager& CGroupHierarchyHolder::agent_manager() const
 	return (*m_agent_manager);
 }
 
+IC bool CGroupHierarchyHolder::has_agent_manager() const
+{
+	return !!m_agent_manager;
+}
+
 IC CAgentManager* CGroupHierarchyHolder::get_agent_manager() const
 {
 	return (m_agent_manager);

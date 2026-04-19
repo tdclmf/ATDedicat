@@ -201,7 +201,16 @@ bool CALifeUpdateManager::change_level(NET_Packet& net_packet)
 	string256 temp;
 	*m_server_command_line = strconcat(sizeof(temp), temp, autoave_name, temp0);
 
+#ifdef ENGINE_LUA_ALIFE_STORAGE_MANAGER_CALLBACKS
+	// Internal autosave during level jump runs while actor/holder coordinates are being rewritten.
+	// Lua save callbacks may observe transient state and crash on nil game objects, so suppress them.
+	const bool old_lua_callbacks_state = g_alife_storage_manager_allow_lua_callbacks;
+	g_alife_storage_manager_allow_lua_callbacks = false;
+#endif
 	save(autoave_name);
+#ifdef ENGINE_LUA_ALIFE_STORAGE_MANAGER_CALLBACKS
+	g_alife_storage_manager_allow_lua_callbacks = old_lua_callbacks_state;
+#endif
 
 	graph().actor()->m_tGraphID = safe_graph_vertex_id;
 	graph().actor()->m_tNodeID = safe_level_vertex_id;

@@ -286,12 +286,9 @@ void CControlPathBuilder::make_inactual()
 
 bool CControlPathBuilder::can_use_distributed_computations(u32 option) const
 {
-	if (!Actor())
-		return true;
-
-	VERIFY(Actor());
-	VERIFY(inherited_com::m_object);
-	if (Actor()->memory().visual().visible_right_now(inherited_com::m_object)) return false;
+	// In MP/dedicated proxy modes Actor() may point to a technical/non-possessed actor
+	// that does not have valid runtime memory/vision state for this check.
+	// Keep the base threading decision and avoid actor-memory access here.
 	return inherited::can_use_distributed_computations(option);
 }
 

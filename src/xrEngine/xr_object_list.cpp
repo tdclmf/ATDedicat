@@ -10,6 +10,7 @@
 #include "../xrCore/net_utils.h"
 
 #include "CustomHUD.h"
+#include <unordered_map>
 
 class fClassEQ
 {
@@ -23,6 +24,27 @@ public:
 #ifdef DEBUG
 BOOL debug_destroy = TRUE;
 #endif
+
+namespace
+{
+	IC void crow_trace_to_active(CObject* object, LPCSTR where, LPCSTR reason)
+	{
+		if (!object || !object->AmICrow())
+			return;
+
+		// Avoid log flooding when an object flips every frame between crow/full update paths.
+		static std::unordered_map<u16, u32> s_last_log_time;
+		const u32 now = Device.dwTimeGlobal;
+		u32& last = s_last_log_time[object->ID()];
+		if (last && (now - last) < 2000)
+			return;
+
+		last = now;
+		//Msg("* [CROW_TRACE] id=%u name=%s -> ACTIVE where=%s reason=%s pos=(%.2f %.2f %.2f)",
+			//object->ID(), object->cName().c_str(), where ? where : "?", reason ? reason : "?",
+			//object->Position().x, object->Position().y, object->Position().z);
+	}
+}
 
 CObjectList::CObjectList() :
 	m_owner_thread_id(GetCurrentThreadId())
@@ -193,6 +215,7 @@ void CObjectList::clear_crow_vec(Objects& o)
 	for (u32 _it = 0; _it < o.size(); _it++)
 	{
 		// Msg ("[%d][0x%08x]IAmNotACrowAnyMore (clear_crow_vec)", Device.dwFrame, dynamic_cast<void*>(o[_it]));
+		crow_trace_to_active(o[_it], "CObjectList::clear_crow_vec", "clear_crow_vector");
 		o[_it]->IAmNotACrowAnyMore();
 	}
 	o.clear_not_free();
@@ -306,6 +329,7 @@ void CObjectList::Update(bool bForce)
 			CObject** e = objects + objects_count;
 			for (CObject** i = b; i != e; ++i)
 			{
+				crow_trace_to_active(*i, "CObjectList::Update", "selected_for_full_update_workload");
 				(*i)->IAmNotACrowAnyMore();
 				(*i)->dwFrame_AsCrow = u32(-1);
 			}

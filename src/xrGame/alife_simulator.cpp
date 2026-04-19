@@ -69,10 +69,18 @@ CALifeSimulator::CALifeSimulator(xrServer* server, shared_str* command_line) :
 	xr_strcat(temp, p.m_alife);
 	*command_line = temp;
 
-	LPCSTR start_game_callback = pSettings->r_string(alife_section, "start_game_callback");
-	luabind::functor<void> functor;
-	R_ASSERT2(ai().script_engine().functor(start_game_callback,functor), "failed to get start game callback");
-	functor();
+	const bool is_new_game = !xr_strcmp(p.m_new_or_load, "new");
+	if (is_new_game)
+	{
+		LPCSTR start_game_callback = pSettings->r_string(alife_section, "start_game_callback");
+		luabind::functor<void> functor;
+		R_ASSERT2(ai().script_engine().functor(start_game_callback,functor), "failed to get start game callback");
+		functor();
+	}
+	else
+	{
+		Msg("* [SV_ALIFE] Skipping start_game_callback for load mode [%s]", p.m_new_or_load);
+	}
 
 	load(p.m_game_or_spawn, !xr_strcmp(p.m_new_or_load, "load") ? false : true, !xr_strcmp(p.m_new_or_load, "new"));
 }

@@ -392,6 +392,12 @@ void CPHActorCharacter::InitContact(dContact* c, bool& do_collide, u16 material_
 
 void CPHActorCharacter::ChooseRestrictionType(ERestrictionType my_type, float my_depth, CPHCharacter* ch)
 {
+	if (!ch)
+		return;
+
+	if (m_restrictors.size() <= rtStalkerSmall)
+		return;
+
 	if (my_type != rtStalker || (ch->RestrictionType() != rtStalker && ch->RestrictionType() != rtStalkerSmall))return;
 	float checkR = m_restrictors[rtStalkerSmall]->m_restrictor_radius;
 	//1.5f;//+m_restrictors[rtStalker]->m_restrictor_radius)/2.f;

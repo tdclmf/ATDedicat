@@ -16,6 +16,14 @@
 #include <unordered_map>
 #include <set>
 
+extern ENGINE_API bool g_dedicated_server;
+
+static bool ShouldUseNonFatalScriptErrors()
+{
+	// Dedicated server and proxy/runtime-without-ALife must survive script-side compatibility gaps.
+	return g_dedicated_server || !ai().get_alife();
+}
+
 #ifdef USE_DEBUGGER
 #	ifndef USE_LUA_STUDIO
 #		include "script_debugger.h"
@@ -227,6 +235,14 @@ void CScriptEngine::lua_error(lua_State* L)
 	auto error_str = make_string("\n%s\n\nLUA error: %s\n\nCheck log for details", lua_error_line.c_str(), lua_tostring(L, -1));
 	LPCSTR error_msg = error_str.c_str();
 
+	if (ShouldUseNonFatalScriptErrors())
+	{
+		Msg("! [SCRIPT ERROR][non-fatal] %s", error_msg);
+		if (lua_isstring(L, -1))
+			lua_pop(L, 1);
+		return;
+	}
+
 #if !XRAY_EXCEPTIONS
 	Debug.fatal(DEBUG_INFO, error_msg);
 #else
@@ -257,6 +273,14 @@ int CScriptEngine::lua_pcall_failed(lua_State* L)
 
 	auto error_str = make_string("\n%s\n\nLUA error: %s\n\nCheck log for details", lua_error_line.c_str(), lua_isstring(L, -1) ? lua_tostring(L, -1) : "");
 	LPCSTR error_msg = error_str.c_str();
+
+	if (ShouldUseNonFatalScriptErrors())
+	{
+		Msg("! [SCRIPT ERROR][non-fatal] %s", error_msg);
+		if (lua_isstring(L, -1))
+			lua_pop(L, 1);
+		return (LUA_ERRRUN);
+	}
 
 #if !XRAY_EXCEPTIONS
 	Debug.fatal(DEBUG_INFO, error_msg);
@@ -323,6 +347,137 @@ int auto_load(lua_State* L)
 	ai().script_engine().process_file_if_exists(lua_tostring(L, 2), false);
 	lua_rawget(L, 1);
 	return (1);
+}
+
+static void EnsureScriptSafetyGlobals(lua_State* L)
+{
+	// Keep compatibility with script packs that assume SIMBOARD is always present.
+	// In dedicated/proxy modes this table can be missing and causes repetitive non-fatal Lua errors.
+	static constexpr LPCSTR bootstrap_script = R"lua(
+if type(db) ~= "table" then
+	db = {}
+end
+if type(db.campfire_table_by_smart_names) ~= "table" then
+	db.campfire_table_by_smart_names = {}
+end
+)lua";
+
+	if (luaL_dostring(L, bootstrap_script) != 0)
+	{
+		Msg("! [LUA] EnsureScriptSafetyGlobals failed: %s", lua_tostring(L, -1));
+		lua_pop(L, 1);
+		return;
+	}
+
+	if (!g_dedicated_server)
+	{
+		// Client/proxy compatibility: only when ALife is not available.
+		// Do NOT define sim_board/get_sim_board here, otherwise real sim_board.script autoload breaks.
+		if (!ai().get_alife())
+		{
+			static constexpr LPCSTR client_simboard_fallback = R"lua(
+if type(SIMBOARD) ~= "table" then
+	SIMBOARD = {}
+end
+if type(SIMBOARD.smarts_by_names) ~= "table" then
+	SIMBOARD.smarts_by_names = {}
+end
+)lua";
+
+			if (luaL_dostring(L, client_simboard_fallback) != 0)
+			{
+				Msg("! [LUA] EnsureScriptSafetyGlobals failed: %s", lua_tostring(L, -1));
+				lua_pop(L, 1);
+			}
+		}
+		return;
+	}
+
+	// Dedicated server has no local playable actor, but many scripts still expect db.actor.
+	static constexpr LPCSTR dedicated_actor_fallback = R"lua(
+if type(db) ~= "table" then
+	db = {}
+end
+if db.actor == nil then
+	local function __dummy_vec(x, y, z)
+		local v = vector()
+		v:set(x, y, z)
+		return v
+	end
+	local function __dummy_nil()
+		return nil
+	end
+	local function __dummy_false()
+		return false
+	end
+	local function __dummy_zero()
+		return 0
+	end
+	local function __dummy_noop()
+	end
+
+	db.actor = {
+		position = function() return __dummy_vec(100000.0, 100000.0, 100000.0) end,
+		direction = function() return __dummy_vec(0.0, 0.0, 1.0) end,
+		bone_position = function() return __dummy_vec(100000.0, 100000.0, 100000.0) end,
+
+		alive = __dummy_false,
+		id = function() return 65535 end,
+		object = __dummy_nil,
+		name = function() return "server_actor" end,
+		game_vertex_id = __dummy_zero,
+		level_vertex_id = __dummy_zero,
+
+		money = __dummy_zero,
+		get_total_weight = __dummy_zero,
+		character_icon = function() return "" end,
+		character_community = function() return "sim_default_stalker" end,
+		set_character_community = __dummy_noop,
+		set_character_icon = __dummy_noop,
+
+		active_slot = __dummy_zero,
+		active_item = __dummy_nil,
+		active_detector = __dummy_nil,
+		item_in_slot = __dummy_nil,
+		is_on_belt = __dummy_false,
+		make_item_active = __dummy_noop,
+		activate_slot = __dummy_noop,
+		show_detector = __dummy_noop,
+		force_hide_detector = __dummy_noop,
+		hide_weapon = __dummy_noop,
+		restore_weapon = __dummy_noop,
+		inventory_for_each = __dummy_noop,
+		iterate_inventory = __dummy_noop,
+		iterate_ruck = __dummy_noop,
+		iterate_belt = __dummy_noop,
+		transfer_item = __dummy_false,
+
+		get_attached_vehicle = __dummy_nil,
+		get_current_holder = __dummy_nil,
+		is_talking = __dummy_false,
+		stop_talk = __dummy_noop,
+		run_talk_dialog = __dummy_noop,
+		see = __dummy_false,
+
+		has_info = __dummy_false,
+		give_info_portion = __dummy_noop,
+		disable_info_portion = __dummy_noop,
+		change_radiation = __dummy_noop,
+		disable_hit_marks = __dummy_noop,
+		set_callback = __dummy_noop,
+		kill = __dummy_noop,
+	}
+end
+if db.server_actor == nil then
+	db.server_actor = db.actor
+end
+)lua";
+
+	if (luaL_dostring(L, dedicated_actor_fallback) != 0)
+	{
+		Msg("! [LUA] EnsureScriptSafetyGlobals failed: %s", lua_tostring(L, -1));
+		lua_pop(L, 1);
+	}
 }
 
 void CScriptEngine::setup_auto_load()
@@ -401,6 +556,8 @@ void CScriptEngine::init()
 #ifdef XRGAME_EXPORTS
 	load_common_scripts();
 #endif
+
+	EnsureScriptSafetyGlobals(lua());
 	m_stack_level = lua_gettop(lua());
 }
 
@@ -695,3 +852,4 @@ void CScriptEngine::on_error(lua_State* state)
     debugger()->on_error	( state );
 #endif // #if defined(USE_DEBUGGER) && defined(USE_LUA_STUDIO)
 }
+

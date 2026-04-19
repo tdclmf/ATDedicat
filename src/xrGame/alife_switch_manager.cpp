@@ -23,6 +23,20 @@
 
 using namespace ALife;
 
+namespace
+{
+	static u32 g_alife_switch_manager_diag_budget = 400;
+
+	IC bool alife_switch_manager_diag_allow_log()
+	{
+		if (!g_alife_switch_manager_diag_budget)
+			return false;
+
+		--g_alife_switch_manager_diag_budget;
+		return true;
+	}
+}
+
 struct remove_non_savable_predicate
 {
 	xrServer* m_server;
@@ -50,6 +64,61 @@ CALifeSwitchManager::~CALifeSwitchManager()
 void CALifeSwitchManager::add_online(CSE_ALifeDynamicObject* object, bool update_registries)
 {
 	START_PROFILE("ALife/switch/add_online")
+		if (alife_switch_manager_diag_allow_log())
+		{
+			Msg("* [ALIFE_SW][ADD_ONLINE] id=%u name=[%s] parent=%u graph=%u node=%u update_reg=%u server_client=%u",
+				object->ID,
+				object->name_replace(),
+				object->ID_Parent,
+				object->m_tGraphID,
+				object->m_tNodeID,
+				update_registries ? 1 : 0,
+				server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
+		}
+
+		CSE_ALifeObject* object_alife = object->cast_alife_object();
+		if (object->ID_Parent == u16(-1) && (object->m_tSpawnID != ALife::_SPAWN_ID(-1) ||
+			(object_alife && object_alife->m_story_id != INVALID_STORY_ID) ||
+			(object_alife && object_alife->m_spawn_story_id != ALife::_SPAWN_STORY_ID(-1))))
+		{
+			for (const auto& pair : objects().objects())
+			{
+				CSE_ALifeDynamicObject* other = pair.second;
+				if (!other || other == object || other->ID_Parent != u16(-1))
+					continue;
+
+				CSE_ALifeObject* other_alife = other->cast_alife_object();
+				const bool same_spawn_id =
+					(object->m_tSpawnID != ALife::_SPAWN_ID(-1)) &&
+					(other->m_tSpawnID == object->m_tSpawnID);
+				const bool same_story_id =
+					object_alife && other_alife &&
+					(object_alife->m_story_id != INVALID_STORY_ID) &&
+					(object_alife->m_story_id == other_alife->m_story_id);
+				const bool same_spawn_story_id =
+					object_alife && other_alife &&
+					(object_alife->m_spawn_story_id != ALife::_SPAWN_STORY_ID(-1)) &&
+					(object_alife->m_spawn_story_id == other_alife->m_spawn_story_id);
+
+				if (!(same_spawn_id || same_story_id || same_spawn_story_id))
+					continue;
+
+				// Keep lower-ID canonical object and freeze duplicate offline object.
+				if (other->ID < object->ID)
+				{
+					LPCSTR reason = same_story_id ? "story_id" : (same_spawn_story_id ? "spawn_story_id" : "spawn_id");
+					Msg("! [SV_DUP_SWITCH] Preventing duplicate online by %s: keep_id=%u drop_id=%u keep=[%s] drop=[%s]",
+						reason,
+						other->ID,
+						object->ID,
+						other->name_replace() ? other->name_replace() : "",
+						object->name_replace() ? object->name_replace() : "");
+					object->can_switch_online(false);
+					return;
+				}
+			}
+		}
+
 		VERIFY((ai().game_graph().vertex(object->m_tGraphID)->level_id() == graph().level().level_id()));
 
 		object->m_bOnline = true;
@@ -77,6 +146,19 @@ void CALifeSwitchManager::add_online(CSE_ALifeDynamicObject* object, bool update
 void CALifeSwitchManager::remove_online(CSE_ALifeDynamicObject* object, bool update_registries)
 {
 	START_PROFILE("ALife/switch/remove_online")
+		if (alife_switch_manager_diag_allow_log())
+		{
+			Msg("* [ALIFE_SW][REMOVE_ONLINE] id=%u name=[%s] parent=%u graph=%u node=%u children=%u update_reg=%u server_client=%u",
+				object->ID,
+				object->name_replace(),
+				object->ID_Parent,
+				object->m_tGraphID,
+				object->m_tNodeID,
+				object->children.size(),
+				update_registries ? 1 : 0,
+				server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
+		}
+
 		object->m_bOnline = false;
 
 		m_saved_chidren = object->children;

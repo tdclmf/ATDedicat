@@ -12,6 +12,10 @@
 
 class NET_Packet;
 
+#ifdef ENGINE_LUA_ALIFE_STORAGE_MANAGER_CALLBACKS
+extern bool g_alife_storage_manager_allow_lua_callbacks;
+#endif
+
 class CALifeStorageManager : public virtual CALifeSimulatorBase
 {
 	friend class CALifeUpdatePredicate;

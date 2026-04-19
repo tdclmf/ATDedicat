@@ -47,7 +47,12 @@ void CGroupHierarchyHolder::register_in_group(CEntity* member)
 {
 	VERIFY(member);
 	MEMBER_REGISTRY::iterator I = std::find(m_members.begin(), m_members.end(), member);
-	VERIFY3(I == m_members.end(), "Specified group member has already been found", *member->cName());
+	if (I != m_members.end())
+	{
+		Msg("! CGroupHierarchyHolder::register_in_group duplicate member [%s][%u]", member->cName().c_str(),
+		    member->ID());
+		return;
+	}
 
 	if (m_members.empty())
 	{
@@ -104,7 +109,12 @@ void CGroupHierarchyHolder::unregister_in_group(CEntity* member)
 {
 	VERIFY(member);
 	MEMBER_REGISTRY::iterator I = std::find(m_members.begin(), m_members.end(), member);
-	VERIFY3(I != m_members.end(), "Specified group member cannot be found", *member->cName());
+	if (I == m_members.end())
+	{
+		Msg("! CGroupHierarchyHolder::unregister_in_group missing member [%s][%u]", member->cName().c_str(),
+		    member->ID());
+		return;
+	}
 	m_members.erase(I);
 }
 
@@ -127,7 +137,9 @@ void CGroupHierarchyHolder::unregister_in_agent_manager(CEntity* member)
 {
 	if (get_agent_manager())
 	{
-		agent_manager().member().remove(member);
+		CMemberOrder* order = agent_manager().member().get_member(member->ID());
+		if (order)
+			agent_manager().member().remove(member);
 		if (agent_manager().member().members().empty())
 			xr_delete(m_agent_manager);
 	}

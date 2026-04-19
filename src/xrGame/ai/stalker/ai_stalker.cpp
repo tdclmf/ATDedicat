@@ -1314,7 +1314,8 @@ void CAI_Stalker::net_Relcase(CObject* O)
 	if (!g_Alive())
 		return;
 
-	agent_manager().remove_links(O);
+	if (Level().seniority_holder().team(g_Team()).squad(g_Squad()).group(g_Group()).has_agent_manager())
+		agent_manager().remove_links(O);
 	m_pPhysics_support->in_NetRelcase(O);
 }
 
@@ -1438,12 +1439,13 @@ void CAI_Stalker::fill_bones_body_parts(LPCSTR bone_id, const ECriticalWoundType
 
 void CAI_Stalker::on_before_change_team()
 {
-	m_registered_in_combat_on_migration = agent_manager().member().registered_in_combat(this);
+	m_registered_in_combat_on_migration =
+			Level().seniority_holder().team(g_Team()).squad(g_Squad()).group(g_Group()).has_agent_manager() && agent_manager().member().registered_in_combat(this);
 }
 
 void CAI_Stalker::on_after_change_team()
 {
-	if (!m_registered_in_combat_on_migration)
+	if (!m_registered_in_combat_on_migration || !Level().seniority_holder().team(g_Team()).squad(g_Squad()).group(g_Group()).has_agent_manager())
 		return;
 
 	agent_manager().member().register_in_combat(this);

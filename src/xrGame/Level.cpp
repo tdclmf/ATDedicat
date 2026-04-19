@@ -260,6 +260,7 @@ CLevel::~CLevel()
 	xr_delete(m_ph_commander_scripts);
 	pObjects4CrPr.clear();
 	pActors4CrPr.clear();
+	net_proxy_release_game_graph();
 	ai().unload();
 #ifdef DEBUG
     xr_delete(m_level_debug);

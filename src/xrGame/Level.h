@@ -20,6 +20,8 @@ class xrServer;
 class game_cl_GameState;
 class NET_Queue_Event;
 class CSE_Abstract;
+class CGameGraph;
+class IReader;
 class CSpaceRestrictionManager;
 class CSeniorityHierarchyHolder;
 class CClientSpawnManager;
@@ -72,6 +74,9 @@ protected:
 	CPHCommander* m_ph_commander = nullptr;
 	CPHCommander* m_ph_commander_scripts = nullptr;
 	CPHCommander* m_ph_commander_physics_worldstep = nullptr;
+	IReader* m_proxy_spawn_file = nullptr;
+	IReader* m_proxy_spawn_chunk = nullptr;
+	CGameGraph* m_proxy_game_graph = nullptr;
 	// Local events
 	EVENT eChangeRP;
 	EVENT eDemoPlay;
@@ -133,6 +138,8 @@ private:
 	void BlockCheatLoad();
 	bool Connect2Server(const char* options);
 	void SendClientDigestToServer();
+	bool net_proxy_bootstrap_game_graph();
+	void net_proxy_release_game_graph();
 	shared_str m_client_digest; // for screenshots
 
 public:

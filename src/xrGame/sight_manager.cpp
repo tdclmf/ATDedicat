@@ -103,6 +103,8 @@ static inline float select_speed(float const distance, float const speed, float 
 void CSightManager::Exec_Look(float time_delta)
 {
 	START_PROFILE("Sight Manager")
+		if (m_actions.empty())
+			return;
 		SBoneRotation& body = object().movement().m_body;
 		SBoneRotation& head = object().movement().m_head;
 

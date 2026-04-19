@@ -61,6 +61,12 @@ void load_attack_goodwill()
 
 void RELATION_REGISTRY::Action(CEntityAlive* from, CEntityAlive* to, ERelationAction action)
 {
+	if (!from || !to)
+		return;
+
+	// Relation/reputation changes are server-authoritative and require ALife registries.
+	if (!ai().get_alife())
+		return;
 	static CHARACTER_GOODWILL friend_kill_goodwill = pSettings->r_s32(ACTIONS_POINTS_SECT, "friend_kill_goodwill");
 	static CHARACTER_GOODWILL neutral_kill_goodwill = pSettings->r_s32(ACTIONS_POINTS_SECT, "neutral_kill_goodwill");
 	static CHARACTER_GOODWILL enemy_kill_goodwill = pSettings->r_s32(ACTIONS_POINTS_SECT, "enemy_kill_goodwill");

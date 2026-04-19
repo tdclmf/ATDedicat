@@ -444,7 +444,7 @@ void CActor::net_Import_Base(NET_Packet& P)
 	if (OnClient())
 		//------------------------------------------------
 	{
-		// MP/bridge clients must not call Inventory::Activate() here:
+		// Animor: clients must not call Inventory::Activate() here:
 		// on client it early-outs and active item never appears in hands.
 		// Keep slot state in sync directly, like CActorMP import path does.
 		// But do not consume stale generic M_UPDATE slot data for remote actors.
@@ -456,13 +456,13 @@ void CActor::net_Import_Base(NET_Packet& P)
 		}
 	}
 
-	// Dedicated-single bridge:
+	// Animor:
 	// M_UPDATE_OBJECTS may also contain stale yaw and causes visible orientation flicker.
 	// Keep only relayed M_CL_UPDATE as source for remote actor interpolation/state.
 	if (ignore_remote_base_from_non_cl_update)
 		return;
 
-	// Dedicated-single bridge:
+	// Animor:
 	// In this mode physics correction path may lag behind net base updates.
 	// Apply latest remote actor orientation/state immediately from base packet.
 	if (OnClient() && !Local())
@@ -521,16 +521,42 @@ void CActor::net_Import_Physic(NET_Packet& P)
 
 	if (m_u16NumBones != 1)
 	{
+		// Quantized dead-body stream format:
+		// u8 + vec3(min) + vec3(max) + bones * (vec_q8 + quat_q8 + vec_q8)
+		constexpr u32 dead_body_header_size = sizeof(u8) + sizeof(float) * 3 * 2;
+		constexpr u32 dead_body_state_size = 10; // 3 + 4 + 3 bytes (q8 packed)
+		const u32 expected_size = dead_body_header_size + u32(m_u16NumBones) * dead_body_state_size;
+		if (P.r_elapsed() < expected_size)
+		{
+			Msg("! [NET] CActor::net_Import_Physic truncated dead-body packet id=%u bones=%u left=%u need=%u",
+			    ID(), m_u16NumBones, P.r_elapsed(), expected_size);
+			P.r_advance(P.r_elapsed());
+			return;
+		}
+
 		Fvector min, max;
 
 		P.r_u8();
 		P.r_vec3(min);
 		P.r_vec3(max);
 
+		if (!_valid(min) || !_valid(max))
+		{
+			Msg("! [NET] CActor::net_Import_Physic invalid dead-body bounds id=%u bones=%u",
+			    ID(), m_u16NumBones);
+			P.r_advance(u32(m_u16NumBones) * dead_body_state_size);
+			return;
+		}
+
+		if (min.x > max.x) { const float t = min.x; min.x = max.x; max.x = t; }
+		if (min.y > max.y) { const float t = min.y; min.y = max.y; max.y = t; }
+		if (min.z > max.z) { const float t = min.z; min.z = max.z; max.z = t; }
+
+		const u16 local_sync_items = PHGetSyncItemsNumber();
+
 		for (u16 i = 0; i < m_u16NumBones; i++)
 		{
-			SPHNetState state, stateL;
-			PHGetSyncItem(i)->get_State(state);
+			SPHNetState stateL;
 			//			stateL.net_Load(P, min, max);
 			r_vec_q8(P, stateL.position, min, max);
 			r_qt_q8(P, stateL.quaternion);
@@ -539,6 +565,23 @@ void CActor::net_Import_Physic(NET_Packet& P)
 			stateL.linear_vel.sub(stateL.position);
 			stateL.linear_vel.mul(10.0f);
 			//---------------------------------------
+
+			if (i >= local_sync_items)
+				continue;
+
+			CPHSynchronize* sync_item = PHGetSyncItem(i);
+			if (!sync_item)
+				continue;
+
+			if (!_valid(stateL.position) || !_valid(stateL.linear_vel) ||
+				!_valid(stateL.quaternion.x) || !_valid(stateL.quaternion.y) ||
+				!_valid(stateL.quaternion.z) || !_valid(stateL.quaternion.w))
+			{
+				continue;
+			}
+
+			SPHNetState state;
+			sync_item->get_State(state);
 			state.position = stateL.position;
 			state.previous_position = stateL.position;
 			state.quaternion = stateL.quaternion;
@@ -556,6 +599,25 @@ void CActor::net_Import_Physic(NET_Packet& P)
 	}
 	else
 	{
+		constexpr u32 single_body_size =
+			sizeof(u8) +      // enabled
+			sizeof(float) * ( // vectors + quaternion
+				3 + // angular_vel
+				3 + // linear_vel
+				3 + // force
+				3 + // torque
+				3 + // position
+				4   // quaternion
+			);
+
+		if (P.r_elapsed() < single_body_size)
+		{
+			Msg("! [NET] CActor::net_Import_Physic truncated single-body packet id=%u left=%u need=%u",
+			    ID(), P.r_elapsed(), single_body_size);
+			P.r_advance(P.r_elapsed());
+			return;
+		}
+
 		net_update_A N_A;
 
 		P.r_u8(*((u8*)&(N_A.State.enabled)));
@@ -572,6 +634,20 @@ void CActor::net_Import_Physic(NET_Packet& P)
 		P.r_float(N_A.State.quaternion.y);
 		P.r_float(N_A.State.quaternion.z);
 		P.r_float(N_A.State.quaternion.w);
+
+		if (!_valid(N_A.State.position) ||
+			!_valid(N_A.State.angular_vel) ||
+			!_valid(N_A.State.linear_vel) ||
+			!_valid(N_A.State.force) ||
+			!_valid(N_A.State.torque) ||
+			!_valid(N_A.State.quaternion.x) ||
+			!_valid(N_A.State.quaternion.y) ||
+			!_valid(N_A.State.quaternion.z) ||
+			!_valid(N_A.State.quaternion.w))
+		{
+			Msg("! [NET] CActor::net_Import_Physic invalid single-body state id=%u", ID());
+			return;
+		}
 
 		if (!NET.empty())
 			N_A.dwTimeStamp = NET.back().dwTimeStamp;
@@ -658,6 +734,11 @@ static void TryBindDbActorToLocalPlayer(u16 actor_id)
 	{
 		lua_pushvalue(L, -2);
 		lua_setfield(L, -2, "actor");
+		if (g_dedicated_server)
+		{
+			lua_pushvalue(L, -2);
+			lua_setfield(L, -2, "server_actor");
+		}
 	}
 	lua_pop(L, 1);
 
@@ -690,11 +771,10 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 
 	if (g_dedicated_server && Game().Type() == eGameIDSingle && E->ID == 0)
 	{
-		Msg("--- [SV] Dedicated single: CActor::net_Spawn skipped for system actor ID: %u", E->ID);
-		return FALSE;
+		Msg("--- [SV] Dedicated single: spawning invisible system actor for db.actor context (ID=%u).", E->ID);
 	}
 
-	// Dedicated-single bridge:
+	// Animor:
 	// remote player actors can occasionally arrive with LOCAL set on non-owning clients.
 	// Normalize flags so only owned actor remains LOCAL+ASPLAYER.
 	if (!g_dedicated_server && OnClient() && Game().Type() == eGameIDSingle)
@@ -724,12 +804,9 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 
 	if (!g_dedicated_server && OnServer())
 	{
-		// Это сработает для обычного синглплеера
 		E->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
 	}
 
-	// 3. ПРОВЕРКА НА ВСЕЛЕНИЕ:
-	// Запрещаем дедику вызывать SetEntity. Вселяемся только в локального ASPLAYER.
 	const bool should_possess =
 		!g_dedicated_server &&
 		E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) &&
@@ -748,7 +825,7 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 		psHUD_Flags.set(HUD_WEAPON_RT, TRUE);
 		psHUD_Flags.set(HUD_WEAPON_RT2, TRUE);
 
-		// Dedicated-single bridge: local player-state can arrive late and keep stale spectator/dead flags.
+		// Animor: local player-state can arrive late and keep stale spectator/dead flags.
 		// Force it to the possessed actor id as soon as possession is confirmed.
 		if (Game().Type() == eGameIDSingle && E->ID != 0)
 		{
@@ -950,10 +1027,23 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 	if (Level().IsDemoPlay() && OnClient())
 		setLocal(FALSE);
 
-	if (Game().Type() == eGameIDSingle && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->s_flags.is(M_SPAWN_OBJECT_LOCAL))
+	const bool should_bind_db_actor =
+		(Game().Type() == eGameIDSingle) && (
+			(E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->s_flags.is(M_SPAWN_OBJECT_LOCAL)) ||
+			(g_dedicated_server && OnServer() && E->ID == 0)
+		);
+
+	if (should_bind_db_actor)
 	{
 		TryBindDbActorToLocalPlayer(ID());
-		SendDedicatedSingleLocalActorVisual(this, "net_spawn");
+		if (!g_dedicated_server)
+			SendDedicatedSingleLocalActorVisual(this, "net_spawn");
+	}
+
+	if (g_dedicated_server && OnServer() && Game().Type() == eGameIDSingle && E->ID == 0)
+	{
+		setVisible(FALSE);
+		Msg("--- [SV] Dedicated single: system db.actor is hidden and bound for scripts (id=%u).", ID());
 	}
 
 	//Alun: In theory it will call SwitchNightVision 'true' when outfit or helmet spawn and moved to slot if m_bNightVisionOn is true
@@ -1231,6 +1321,12 @@ void CActor::PH_B_CrPr() // actions & operations before physic correction-predic
 		if (Local() && OnClient())
 			//------------------------------------------------
 		{
+			if (NET_A.empty())
+			{
+				CrPr_SetActivated(false);
+				return;
+			}
+
 			PHUnFreeze();
 
 			pSyncObj->set_State(NET_A.back().State);
@@ -1245,7 +1341,8 @@ void CActor::PH_B_CrPr() // actions & operations before physic correction-predic
 
 			NET_Last = N;
 			///////////////////////////////////////////////
-			cam_Active()->Set(-unaffected_r_torso.yaw, unaffected_r_torso.pitch, 0);
+			if (cam_Active())
+				cam_Active()->Set(-unaffected_r_torso.yaw, unaffected_r_torso.pitch, 0);
 			//, unaffected_r_torso.roll);		// set's camera orientation
 			if (!N_A.State.enabled)
 			{

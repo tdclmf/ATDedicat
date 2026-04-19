@@ -196,13 +196,18 @@ void IGame_Level::OnFrame()
 		if (this_thread_id != GetCurrentThreadId()) { PROF_THREAD("X-Ray PPL Thread") }
 		Core.InitializeCOM();
 		PROF_EVENT("CalculateBones");
-		
-		static CFrustum ViewBase;
+
+		if (!g_SpatialSpace || !g_pGamePersistent)
+			return;
+
+		CFrustum ViewBase;
 		ViewBase.CreateFromMatrix(Device.mFullTransform_saved, FRUSTUM_P_LRTB | FRUSTUM_P_FAR);
-		Fvector& cam_pos = Device.vCameraPosition_saved;
-		static xr_vector<ISpatial*> spatials = {};
-		g_SpatialSpace->q_sphere(spatials, ISpatial_DB::O_ORDERED, STYPE_RENDERABLE + STYPE_LIGHTSOURCE, cam_pos, g_pGamePersistent->Environment().CurrentEnv->fog_distance);
-		spatials.erase(std::remove_if(spatials.begin(), spatials.end(), [&cam_pos](ISpatial* spatial)
+		const Fvector cam_pos = Device.vCameraPosition_saved;
+		const auto* current_env = g_pGamePersistent->Environment().CurrentEnv;
+		const float fog_distance = current_env ? current_env->fog_distance : 200.f;
+		xr_vector<ISpatial*> spatials;
+		g_SpatialSpace->q_sphere(spatials, ISpatial_DB::O_ORDERED, STYPE_RENDERABLE + STYPE_LIGHTSOURCE, cam_pos, fog_distance);
+		spatials.erase(std::remove_if(spatials.begin(), spatials.end(), [&ViewBase, cam_pos](ISpatial* spatial)
 		{
 			if (!spatial) return true;
 			if (!ViewBase.testSphere_dirty(spatial->spatial.sphere.P, spatial->spatial.sphere.R))
@@ -225,7 +230,7 @@ void IGame_Level::OnFrame()
 			return false;
 		}), spatials.end());
 
-		TRY std::sort(spatials.begin(), spatials.end(), [&cam_pos](ISpatial*& _1, ISpatial*& _2)
+		TRY std::sort(spatials.begin(), spatials.end(), [cam_pos](ISpatial*& _1, ISpatial*& _2)
 		{
 			return _1->spatial.sphere.P.distance_to_sqr(cam_pos) < _2->spatial.sphere.P.distance_to_sqr(cam_pos);
 		}); CATCH

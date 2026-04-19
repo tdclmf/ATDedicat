@@ -5,6 +5,8 @@
 
 # exclude binaries and temporary files
 _build/
+_backups/
+_refs/
 /src/*.tss
 /**/x64/
 **/.vs/
@@ -18,6 +20,7 @@ lua51.exp
 lua51.lib
 luajit.exe
 *.md
+*.log
 
 # luajit generated files
 src/3rd party/luajit-2/src/lj_bcdef.h

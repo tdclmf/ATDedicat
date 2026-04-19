@@ -18,8 +18,90 @@
 #include "character_reputation.h"
 #include "monster_community.h"
 #include "HudManager.h"
+#include "game_graph.h"
 
 extern ENGINE_API bool g_dedicated_server;
+
+bool CLevel::net_proxy_bootstrap_game_graph()
+{
+	if (g_dedicated_server || !OnClient() || OnServer() || ai().get_alife())
+		return false;
+
+	if (m_proxy_game_graph && ai().get_game_graph() == m_proxy_game_graph)
+		return true;
+
+	if (ai().get_game_graph())
+		return true;
+
+	net_proxy_release_game_graph();
+
+	string_path spawn_file;
+	LPCSTR requested_spawn = nullptr;
+	if (g_pGamePersistent)
+		requested_spawn = g_pGamePersistent->m_game_params.m_game_or_spawn;
+
+	LPCSTR selected_spawn = nullptr;
+	if (requested_spawn && xr_strlen(requested_spawn) &&
+		FS.exist(spawn_file, "$game_spawn$", requested_spawn, ".spawn"))
+	{
+		selected_spawn = requested_spawn;
+	}
+	else if (FS.exist(spawn_file, "$game_spawn$", "all", ".spawn"))
+	{
+		selected_spawn = "all";
+	}
+
+	if (!selected_spawn)
+	{
+		Msg("! [NET_PROXY][AI] Can't bootstrap game_graph: spawn file not found (requested=[%s])",
+		    requested_spawn ? requested_spawn : "<empty>");
+		return false;
+	}
+
+	m_proxy_spawn_file = FS.r_open(spawn_file);
+	if (!m_proxy_spawn_file)
+	{
+		Msg("! [NET_PROXY][AI] Can't open spawn file for game_graph bootstrap: [%s]", spawn_file);
+		return false;
+	}
+
+	m_proxy_spawn_chunk = m_proxy_spawn_file->open_chunk(4);
+	if (!m_proxy_spawn_chunk)
+	{
+		Msg("! [NET_PROXY][AI] Spawn [%s] has no chunk 4 (game graph).", spawn_file);
+		net_proxy_release_game_graph();
+		return false;
+	}
+
+	m_proxy_game_graph = xr_new<CGameGraph>(*m_proxy_spawn_chunk);
+	ai().m_game_graph = m_proxy_game_graph;
+
+	Msg("* [NET_PROXY][AI] Client game_graph loaded from [%s] (spawn=%s).", spawn_file, selected_spawn);
+	return true;
+}
+
+void CLevel::net_proxy_release_game_graph()
+{
+	if (m_proxy_game_graph && ai().m_game_graph == m_proxy_game_graph)
+	{
+		ai().unload(true);
+		ai().m_game_graph = nullptr;
+	}
+
+	xr_delete(m_proxy_game_graph);
+
+	if (m_proxy_spawn_chunk)
+	{
+		m_proxy_spawn_chunk->close();
+		m_proxy_spawn_chunk = nullptr;
+	}
+
+	if (m_proxy_spawn_file)
+	{
+		FS.r_close(m_proxy_spawn_file);
+		m_proxy_spawn_file = nullptr;
+	}
+}
 
 bool CLevel::Load_GameSpecific_Before()
 {
@@ -28,14 +110,70 @@ bool CLevel::Load_GameSpecific_Before()
 	g_pGamePersistent->LoadTitle();
 	string_path fn_game;
 
-	if (IsGameTypeSingle() && !ai().get_alife() && FS.exist(fn_game, "$level$", "level.ai") && has_SessionName())
-		ai().load(net_SessionName());
+	const bool client_proxy_world =
+		!g_dedicated_server &&
+		OnClient() &&
+		!OnServer() &&
+		!ai().get_alife();
 
-	if (IsGameTypeSingle() && !ai().get_alife() && ai().get_game_graph() && FS.exist(fn_game, "$level$", "level.game"))
+	if (client_proxy_world)
 	{
-		IReader* stream = FS.r_open(fn_game);
-		ai().patrol_path_storage_raw(*stream);
-		FS.r_close(stream);
+		if (net_proxy_bootstrap_game_graph())
+		{
+			Msg("* [NET_PROXY][AI] Proxy client runtime: game_graph bootstrap ready.");
+		}
+		else
+		{
+			Msg("! [NET_PROXY][AI] Proxy client runtime: game_graph bootstrap failed.");
+		}
+	}
+
+	if (!ai().get_alife() && ai().get_game_graph() && FS.exist(fn_game, "$level$", "level.ai"))
+	{
+		LPCSTR ai_level_name = *name();
+		if (!ai_level_name || !xr_strlen(ai_level_name))
+			ai_level_name = has_SessionName() ? net_SessionName() : nullptr;
+
+		if (!ai_level_name || !xr_strlen(ai_level_name))
+		{
+			Msg("! [NET_PROXY][AI] Can't load ai().load: level name is empty.");
+		}
+		else
+		{
+			const GameGraph::SLevel* level_desc = ai().game_graph().header().level(ai_level_name, true);
+			if (!level_desc)
+			{
+				Msg("! [NET_PROXY][AI] Can't load ai().load: level [%s] not found in game_graph.", ai_level_name);
+			}
+			else
+			{
+				ai().load(ai_level_name);
+
+				if (ai().get_level_graph() && ai().get_cross_table())
+				{
+					Msg("* [NET_PROXY][AI] Loaded level.ai for [%s].", ai_level_name);
+				}
+				else
+				{
+					Msg("! [NET_PROXY][AI] ai().load finished for [%s], but level_graph/cross_table are still missing.",
+					    ai_level_name);
+				}
+			}
+		}
+	}
+
+	if (!ai().get_alife() && ai().get_game_graph() && FS.exist(fn_game, "$level$", "level.game"))
+	{
+		if (ai().get_level_graph() && ai().get_cross_table())
+		{
+			IReader* stream = FS.r_open(fn_game);
+			ai().patrol_path_storage_raw(*stream);
+			FS.r_close(stream);
+		}
+		else
+		{
+			Msg("* [NET_PROXY][AI] Skipping patrol_path_storage_raw: no level_graph/cross_table for current client runtime.");
+		}
 	}
 
 	CHARACTER_COMMUNITY::Reset();

@@ -169,6 +169,7 @@ void CLevel::net_Stop()
 		SaveDemoInfo();
 
 	remove_objects();
+	net_proxy_release_game_graph();
 
 	//WARNING ! remove_objects() uses this flag, so position of this line must e here ..
 	game_configured = FALSE;
@@ -519,7 +520,7 @@ void CLevel::ClearAllObjects()
 	for (u32 i = 0; i < CLObjNum; i++)
 	{
 		CObject* pObj = Level().Objects.o_get_by_iterator(i);
-		if (!pObj->H_Parent())
+		if (pObj->H_Parent())
 			Msg("! ERROR: object's parent is not NULL");
 
 		//-----------------------------------------------------------

@@ -244,7 +244,9 @@ bool CMonsterEnemyManager::enemy_see_me_now()
 {
 	if (Actor() == enemy)
 	{
-		return (Actor()->memory().visual().visible_right_now(monster));
+		// In MP/dedicated proxy modes Actor() can be technical and lack valid memory state.
+		// Avoid actor-memory access here to keep this branch crash-safe.
+		return false;
 	}
 	else
 	{

@@ -76,13 +76,20 @@ void CAgentManager::remove_components()
 
 void CAgentManager::remove_links(CObject* object)
 {
-	corpse().remove_links(object);
-	enemy().remove_links(object);
-	explosive().remove_links(object);
-	location().remove_links(object);
-	member().remove_links(object);
-	memory().remove_links(object);
-	brain().remove_links(object);
+	if (m_corpse)
+		corpse().remove_links(object);
+	if (m_enemy)
+		enemy().remove_links(object);
+	if (m_explosive)
+		explosive().remove_links(object);
+	if (m_location)
+		location().remove_links(object);
+	if (m_member)
+		member().remove_links(object);
+	if (m_memory)
+		memory().remove_links(object);
+	if (m_brain)
+		brain().remove_links(object);
 }
 
 void CAgentManager::update_impl()

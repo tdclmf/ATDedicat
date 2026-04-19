@@ -17,12 +17,81 @@
 #include "message_filter.h"
 #include "weapon_trace.h"
 #include "../xrphysics/iphworld.h"
+#include <unordered_map>
 
 extern LPCSTR map_ver_string;
 extern ENGINE_API bool g_dedicated_server;
 // True only while processing relayed M_CL_UPDATE for actor import.
 // Dedicated-single bridge uses this to prevent M_UPDATE_OBJECTS from overwriting remote actor orientation.
 bool g_dedicated_single_import_from_cl_update = false;
+
+namespace
+{
+struct SCrowClientSyncState
+{
+	std::unordered_map<u16, u32> last_touch_time;
+	std::unordered_map<u16, u32> last_log_time;
+	std::unordered_map<u16, Fvector> last_touch_position;
+};
+
+SCrowClientSyncState g_crow_client_sync_state;
+
+void apply_client_crow_touch(CLevel& level, u16 actor_id, const Fvector& actor_pos)
+{
+	if (!level.IsServer() || Game().Type() != eGameIDSingle)
+		return;
+	if (actor_id == 0)
+		return;
+
+	const u32 now = Device.dwTimeGlobal;
+	u32& last_touch = g_crow_client_sync_state.last_touch_time[actor_id];
+	if (last_touch && (now - last_touch) < 200)
+		return;
+
+	auto pos_it = g_crow_client_sync_state.last_touch_position.find(actor_id);
+	if (pos_it != g_crow_client_sync_state.last_touch_position.end())
+	{
+		// If actor barely moved since previous touch, lower update pressure.
+		const float move_sqr = pos_it->second.distance_to_sqr(actor_pos);
+		if (move_sqr < (1.0f * 1.0f) && last_touch && (now - last_touch) < 400)
+			return;
+		pos_it->second = actor_pos;
+	}
+	else
+	{
+		g_crow_client_sync_state.last_touch_position.emplace(actor_id, actor_pos);
+	}
+
+	last_touch = now;
+
+	const float touch_radius_sqr = CROW_RADIUS2 * CROW_RADIUS2;
+	u32 touched_count = 0;
+
+	const u32 object_count = level.Objects.o_count();
+	for (u32 i = 0; i < object_count; ++i)
+	{
+		CObject* object = level.Objects.o_get_by_iterator(i);
+		if (!object || object->ID() == actor_id || object->getDestroy() || !object->processing_enabled())
+			continue;
+
+		if (object->Position().distance_to_sqr(actor_pos) > touch_radius_sqr)
+			continue;
+
+		object->MakeMeCrow();
+		++touched_count;
+		if (touched_count >= 512)
+			break;
+	}
+
+	u32& last_log = g_crow_client_sync_state.last_log_time[actor_id];
+	if (!last_log || (now - last_log) >= 5000)
+	{
+		Msg("* [CROW_SYNC] actor=%u touched=%u pos=(%.2f %.2f %.2f)",
+		    actor_id, touched_count, actor_pos.x, actor_pos.y, actor_pos.z);
+		last_log = now;
+	}
+}
+} // namespace
 
 LPSTR remove_version_option(LPCSTR opt_str, LPSTR new_opt_str, u32 new_opt_str_size)
 {
@@ -131,6 +200,44 @@ void CLevel::ClientReceive()
 			break;
 		case M_UPDATE_OBJECTS:
 			{
+				u32 imported_objects = 0;
+				bool malformed_packet = false;
+				if (OnClient() && !OnServer() && (Game().Type() == eGameIDSingle))
+				{
+					NET_Packet stats_packet = *P;
+					while (!stats_packet.r_eof())
+					{
+						if (stats_packet.r_elapsed() < (sizeof(u16) + sizeof(u8)))
+						{
+							malformed_packet = true;
+							break;
+						}
+
+						u16 object_id = 0;
+						u8 object_size = 0;
+						stats_packet.r_u16(object_id);
+						stats_packet.r_u8(object_size);
+						(void)object_id;
+
+						if (object_size > stats_packet.r_elapsed())
+						{
+							malformed_packet = true;
+							break;
+						}
+
+						stats_packet.r_advance(object_size);
+						++imported_objects;
+					}
+
+					static u32 s_cl_update_objects_log_time = 0;
+					if (Device.dwTimeGlobal >= s_cl_update_objects_log_time)
+					{
+						Msg("* [CL_NET_UPD] M_UPDATE_OBJECTS bytes=%u objects=%u malformed=%d",
+						    P->B.count, imported_objects, malformed_packet ? 1 : 0);
+						s_cl_update_objects_log_time = Device.dwTimeGlobal + 5000;
+					}
+				}
+
 				Objects.net_Import(P);
 
 				if (OnClient()) UpdateDeltaUpd(timeServer());
@@ -212,6 +319,10 @@ void CLevel::ClientReceive()
 				{
 					//---------------------------------------------------
 					UpdateDeltaUpd(timeServer());
+
+					if (packet_actor_pos_valid && smart_cast<CActor*>(O))
+						apply_client_crow_touch(*this, O->ID(), packet_actor_pos);
+
 					if (!pObjects4CrPr.empty() || !pActors4CrPr.empty())
 					{
 						if (smart_cast<CActor*>(O))

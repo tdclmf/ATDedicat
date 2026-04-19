@@ -29,6 +29,25 @@
 
 u32 g_sv_traffic_optimization_level = eto_none;
 
+namespace
+{
+	IC bool ds_single_force_world_sync_entity(CSE_Abstract& entity)
+	{
+		CSE_ALifeObject* alife_object = entity.cast_alife_object();
+		if (!alife_object || !alife_object->m_bOnline)
+			return false;
+
+		// Animor:
+		// NPC/monsters/traders are server-authoritative world entities and must keep
+		// sending UPDATE_Write packets even when classic Net_Relevant() reports false.
+		return
+			(entity.cast_creature_abstract() != nullptr) ||
+			(entity.cast_monster_abstract() != nullptr) ||
+			(entity.cast_human_abstract() != nullptr) ||
+			(entity.cast_trader_abstract() != nullptr);
+	}
+}
+
 xrClientData::xrClientData() :
 	IClient(Device.GetTimerGlobal())
 {
@@ -284,8 +303,21 @@ void xrServer::MakeUpdatePackets()
 {
 	NET_Packet tmpPacket;
 	u32 position;
+	static u32 s_ds_single_update_log_time = 0;
 
 	m_updator.begin_updates();
+	const bool dedicated_single_authoritative =
+		g_dedicated_server &&
+		game &&
+		(game->Type() == eGameIDSingle);
+
+	u32 considered_relevant = 0;
+	u32 skipped_owner = 0;
+	u32 skipped_ready = 0;
+	u32 written_updates = 0;
+	u32 ownerless_written = 0;
+	u32 forced_world_sync_relevant = 0;
+	u32 world_sync_entities_seen = 0;
 
 	xrS_entities::iterator I = entities.begin();
 	xrS_entities::iterator E = entities.end();
@@ -294,10 +326,32 @@ void xrServer::MakeUpdatePackets()
 		//all entities
 		CSE_Abstract& Test = *(I->second);
 
-		if (0 == Test.owner) continue;
-		if (!Test.net_Ready) continue;
 		if (Test.s_flags.is(M_SPAWN_OBJECT_PHANTOM)) continue; // Surely: phantom
-		if (!Test.Net_Relevant()) continue;
+		const bool world_sync_entity = dedicated_single_authoritative && ds_single_force_world_sync_entity(Test);
+		if (world_sync_entity)
+			++world_sync_entities_seen;
+
+		const bool native_relevant = !!Test.Net_Relevant();
+		if (!native_relevant && !world_sync_entity)
+			continue;
+		if (!native_relevant && world_sync_entity)
+			++forced_world_sync_relevant;
+		++considered_relevant;
+
+		// Dedicated single is server-authoritative for world entities:
+		// owner/net_Ready can be unset for ALife objects that are still valid and relevant.
+		// In this mode we still need to emit UPDATE_Write packets to clients.
+		if (!dedicated_single_authoritative && (0 == Test.owner))
+		{
+			++skipped_owner;
+			continue;
+		}
+
+		if (!dedicated_single_authoritative && !Test.net_Ready)
+		{
+			++skipped_ready;
+			continue;
+		}
 
 		tmpPacket.B.count = 0;
 		// write specific data
@@ -313,10 +367,21 @@ void xrServer::MakeUpdatePackets()
 			if (g_Dump_Update_Write) Msg("* %s : %d", Test.name(), ObjectSize);
 #endif
 			m_updator.write_update_for(Test.ID, tmpPacket);
+			++written_updates;
+			if (0 == Test.owner)
+				++ownerless_written;
 		}
 	} //all entities
 
 	m_updator.end_updates(m_update_begin, m_update_end);
+
+	if (dedicated_single_authoritative && (Device.dwTimeGlobal >= s_ds_single_update_log_time))
+	{
+		Msg("* [SV_NET_UPD] ds-single relevant=%u written=%u ownerless_written=%u skipped_owner=%u skipped_not_ready=%u world_sync_seen=%u forced_world_relevant=%u",
+			considered_relevant, written_updates, ownerless_written, skipped_owner, skipped_ready,
+			world_sync_entities_seen, forced_world_sync_relevant);
+		s_ds_single_update_log_time = Device.dwTimeGlobal + 5000;
+	}
 }
 
 void xrServer::SendUpdatePacketsToAll()
@@ -517,6 +582,20 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
 	{
 	case M_UPDATE:
 		{
+			// Dedicated-single safety:
+			// only the internal server bridge client is allowed to send M_UPDATE chunks.
+			// Remote player clients must use M_CL_UPDATE for actor state only.
+			if (g_dedicated_server && game && game->Type() == eGameIDSingle)
+			{
+				IClient* server_client = GetServerClient();
+				if (!server_client || (sender != server_client->ID))
+				{
+					Msg("! [NET_SAFE] Dropping unauthorized M_UPDATE from client 0x%08x in dedicated single mode",
+					    sender.value());
+					break;
+				}
+			}
+
 			Process_update(P, sender); // No broadcast
 #ifdef DEBUG
 			VERIFY(verify_entities());
@@ -525,12 +604,13 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
 		break;
 	case M_SPAWN:
 		{
-			const bool allow_dedicated_single_remote_spawn =
-				g_dedicated_server && game && game->Type() == eGameIDSingle;
-			if (CL && (CL->flags.bLocal || allow_dedicated_single_remote_spawn))
+			const bool dedicated_single = g_dedicated_server && game && game->Type() == eGameIDSingle;
+			const bool local_sender = CL && CL->flags.bLocal;
+			if (CL && (!dedicated_single || local_sender))
 				Process_spawn(P, sender);
-			else if (allow_dedicated_single_remote_spawn)
-				Msg("! [SV] M_SPAWN ignored: sender client is null in dedicated single mode.");
+			else if (dedicated_single)
+				Msg("! [SV_SPAWN_NETSAFE] Dropping remote M_SPAWN from client 0x%08x in dedicated single mode",
+				    sender.value());
 #ifdef DEBUG
 			VERIFY(verify_entities());
 #endif

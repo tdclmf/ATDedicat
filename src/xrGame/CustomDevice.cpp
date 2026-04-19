@@ -340,7 +340,11 @@ bool CCustomDevice::IsWorking()
 
 void CCustomDevice::UpdateVisibility()
 {
-	bool bClimb = (Actor()->MovingState() & mcClimb) != 0;
+	CActor* const actor = Actor();
+	if (!actor || !g_player_hud)
+		return;
+
+	bool bClimb = (actor->MovingState() & mcClimb) != 0;
 
 	//check visibility
 	if (IsAttachedToHUD())
@@ -360,7 +364,7 @@ void CCustomDevice::UpdateVisibility()
 		}
 		else
 		{
-			CInventoryItem* itm = Actor()->inventory().ActiveItem();
+			CInventoryItem* itm = actor->inventory().ActiveItem();
 			CWeapon* wpn = smart_cast<CWeapon*>(itm);
 			CMissile* msl = smart_cast<CMissile*>(itm);
 			if (msl && m_bThrowAnm)
@@ -397,10 +401,10 @@ void CCustomDevice::UpdateVisibility()
 					{
 						SwitchState(eIdleZoomOut);
 					}
-					else if (m_bNeedActivation && !bClimb && CheckCompatibilityInt(i0->m_parent_hud_item, 0))
-					{
-						ShowDevice(true);
-					}
+				}
+				else if (m_bNeedActivation && !bClimb && i0 && CheckCompatibilityInt(i0->m_parent_hud_item, 0))
+				{
+					ShowDevice(true);
 				}
 			}
 		}

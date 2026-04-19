@@ -21,6 +21,15 @@ void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Pack
 	if (E->net_Processed) return;
 	if (E->s_flags.is(M_SPAWN_OBJECT_PHANTOM)) return;
 
+	// Dedicated-single: do not replicate offline ALife objects to clients.
+	// Offline entities are server-simulation data and creating them on client causes visible duplicates.
+	if (g_dedicated_server && game && game->Type() == eGameIDSingle)
+	{
+		CSE_ALifeObject* alife_object = smart_cast<CSE_ALifeObject*>(E);
+		if (alife_object && !alife_object->m_bOnline && !E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+			return;
+	}
+
 	//.	Msg("Perform connect spawn [%d][%s]", E->ID, E->s_name.c_str());
 
 	// Connectivity order
