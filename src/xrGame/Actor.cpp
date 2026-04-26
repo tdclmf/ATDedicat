@@ -1309,6 +1309,15 @@ void CActor::UpdateCL()
 				}
 			}
 		}
+		else
+		{
+			m_sDefaultObjAction = NULL;
+			m_pUsableObject = NULL;
+			m_pObjectWeLookingAt = NULL;
+			m_pInvBoxWeLookingAt = NULL;
+			m_pPersonWeLookingAt = NULL;
+			m_pVehicleWeLookingAt = NULL;
+		}
 
 		//	UpdateSleep									();
 

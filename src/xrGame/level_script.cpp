@@ -52,11 +52,13 @@
 #include "script_ini_file.h"
 #include "EffectorBobbing.h"
 #include "LevelDebugScript.h"
+#include "level_changer.h"
 
 #include "ui\UIPdaMsgListItem.h"
 #include "ui\UILogsWnd.h"
 #include "game_news.h"
 #include "alife_registry_wrappers.h"
+#include "alife_story_registry.h"
 
 
 using namespace luabind;
@@ -360,22 +362,440 @@ Fvector vertex_position(u32 level_vertex_id)
 	return (ai().level_graph().vertex_position(level_vertex_id));
 }
 
+static bool is_sleep_location_spot(LPCSTR spot_type)
+{
+	return spot_type && (0 == xr_strcmp(spot_type, "ui_pda2_actor_sleep_location"));
+}
+
+static bool is_level_changer_spot(LPCSTR spot_type)
+{
+	if (!spot_type || !*spot_type)
+		return false;
+
+	// Some mod stacks use custom level changer spot ids that still include "level_changer".
+	if (strstr(spot_type, "level_changer"))
+		return true;
+
+	return
+		0 == xr_strcmp(spot_type, "level_changer_up") ||
+		0 == xr_strcmp(spot_type, "level_changer_up_right") ||
+		0 == xr_strcmp(spot_type, "level_changer_right") ||
+		0 == xr_strcmp(spot_type, "level_changer_right_down") ||
+		0 == xr_strcmp(spot_type, "level_changer_down") ||
+		0 == xr_strcmp(spot_type, "level_changer_down_left") ||
+		0 == xr_strcmp(spot_type, "level_changer_left") ||
+		0 == xr_strcmp(spot_type, "level_changer_left_up");
+}
+
+static bool is_known_sleep_zone_name(LPCSTR object_name)
+{
+	if (!object_name || !*object_name)
+		return false;
+
+	static LPCSTR kSleepZones[] = {
+		"actor_surge_hide_2",
+		"agr_army_sleep",
+		"agr_sr_sleep_tunnel",
+		"agr_sr_sleep_wagon",
+		"bar_actor_sleep_zone",
+		"cit_merc_sleep",
+		"ds_farmhouse_sleep",
+		"esc_basement_sleep_area",
+		"esc_secret_sleep",
+		"gar_angar_sleep",
+		"gar_dolg_sleep",
+		"jup_a6_sr_sleep",
+		"mar_a3_sr_sleep",
+		"mil_freedom_sleep",
+		"mil_smart_terran_2_4_sleep",
+		"pri_a16_sr_sleep",
+		"pri_monolith_sleep",
+		"pri_room27_sleep",
+		"rad_sleep_room",
+		"ros_vagon_sleep",
+		"val_abandoned_house_sleep",
+		"val_vagon_sleep",
+		"yan_bunker_sleep_restrictor",
+		"zat_a2_sr_sleep",
+		"pol_secret_sleep"
+	};
+
+	for (LPCSTR sleep_zone : kSleepZones)
+	{
+		if (0 == xr_strcmp(object_name, sleep_zone))
+			return true;
+	}
+
+	return false;
+}
+
+static u32 add_sleep_spots_from_level_objects_fallback(LPCSTR hint)
+{
+	u32 added = 0;
+	const u32 object_count = Level().Objects.o_count();
+
+	for (u32 i = 0; i < object_count; ++i)
+	{
+		CObject* obj = Level().Objects.o_get_by_iterator(i);
+		if (!obj)
+			continue;
+
+		LPCSTR object_name = obj->cName().c_str();
+		if (!is_known_sleep_zone_name(object_name))
+			continue;
+
+		if (Level().MapManager().HasMapLocation("ui_pda2_actor_sleep_location", obj->ID()))
+			continue;
+
+		CMapLocation* ml = Level().MapManager().AddMapLocation("ui_pda2_actor_sleep_location", obj->ID());
+		if (!ml)
+			continue;
+
+		if (hint && xr_strlen(hint))
+			ml->SetHint(hint);
+
+		ml->SetSerializable(true);
+		++added;
+
+		Msg("* [PDA_SLEEP_SPOT] fallback add id=%hu obj=%s", obj->ID(), object_name);
+	}
+
+	return added;
+}
+
+static bool has_any_sleep_spot_on_map()
+{
+	Locations& locations = Level().MapManager().Locations();
+	Locations_it it = locations.begin();
+	Locations_it end = locations.end();
+	for (; it != end; ++it)
+	{
+		if (!!it->spot_type && 0 == xr_strcmp(*it->spot_type, "ui_pda2_actor_sleep_location"))
+			return true;
+	}
+
+	return false;
+}
+
+static bool has_any_level_changer_spot_for_object(u16 object_id)
+{
+	Locations& locations = Level().MapManager().Locations();
+	Locations_it it = locations.begin();
+	Locations_it end = locations.end();
+	for (; it != end; ++it)
+	{
+		if (it->object_id != object_id)
+			continue;
+
+		if (!!it->spot_type && is_level_changer_spot(*it->spot_type))
+			return true;
+	}
+
+	return false;
+}
+
+static void sync_story_objects_lua_from_alife_once(LPCSTR reason)
+{
+	(void)reason;
+	// Story registry ownership remains script-side (Monolith behavior).
+	// Do not mutate Lua story_objects tables from here.
+}
+
+static void dump_story_objects_state_once(LPCSTR reason)
+{
+	(void)reason;
+}
+
+static u32 add_level_changer_spot_fallback(LPCSTR spot_type, LPCSTR hint, bool serializable)
+{
+	if (!is_level_changer_spot(spot_type))
+		return 0;
+
+	u32 added = 0;
+	const u32 object_count = Level().Objects.o_count();
+
+	for (u32 i = 0; i < object_count; ++i)
+	{
+		CObject* obj = Level().Objects.o_get_by_iterator(i);
+		if (!obj)
+			continue;
+
+		CLevelChanger* changer = smart_cast<CLevelChanger*>(obj);
+		if (!changer)
+			continue;
+
+		if (Level().MapManager().HasMapLocation(spot_type, obj->ID()))
+			continue;
+
+		// Keep one level-changer marker per changer object when we don't know source id.
+		if (has_any_level_changer_spot_for_object(obj->ID()))
+			continue;
+
+		CMapLocation* ml = Level().MapManager().AddMapLocation(spot_type, obj->ID());
+		if (!ml)
+			continue;
+
+		if (hint && xr_strlen(hint))
+			ml->SetHint(hint);
+
+		if (serializable)
+			ml->SetSerializable(true);
+
+		++added;
+		Msg("* [LC_SPOT] fallback add id=%hu spot=%s hint=%s obj=%s",
+			obj->ID(),
+			spot_type ? spot_type : "<null>",
+			(hint && xr_strlen(hint)) ? hint : "<empty>",
+			obj->cName().c_str());
+		break;
+	}
+
+	return added;
+}
+
+static bool lua_table_bool_func_1arg(LPCSTR table_name, LPCSTR function_name, LPCSTR arg, bool& result)
+{
+	result = false;
+
+	lua_State* L = ai().script_engine().lua();
+	if (!L)
+		return false;
+
+	const int top = lua_gettop(L);
+	lua_getglobal(L, table_name);
+	if (!lua_istable(L, -1))
+	{
+		lua_settop(L, top);
+		return false;
+	}
+
+	lua_getfield(L, -1, function_name);
+	if (!lua_isfunction(L, -1))
+	{
+		lua_settop(L, top);
+		return false;
+	}
+
+	lua_pushstring(L, arg ? arg : "");
+	if (lua_pcall(L, 1, 1, 0) != 0)
+	{
+		LPCSTR error_text = lua_tostring(L, -1);
+		Msg("! [LC_SPOT] lua call failed: %s.%s('%s') err=%s",
+			table_name,
+			function_name,
+			arg ? arg : "<null>",
+			error_text ? error_text : "<no error text>");
+		lua_settop(L, top);
+		return false;
+	}
+
+	result = lua_toboolean(L, -1) != 0;
+	lua_settop(L, top);
+	return true;
+}
+
+static bool lua_alife_opened_routes_flag(bool& result)
+{
+	result = false;
+
+	lua_State* L = ai().script_engine().lua();
+	if (!L)
+		return false;
+
+	const int top = lua_gettop(L);
+	lua_getglobal(L, "alife_storage_manager");
+	if (!lua_istable(L, -1))
+	{
+		lua_settop(L, top);
+		return false;
+	}
+
+	lua_getfield(L, -1, "get_state");
+	if (!lua_isfunction(L, -1))
+	{
+		lua_settop(L, top);
+		return false;
+	}
+
+	if (lua_pcall(L, 0, 1, 0) != 0)
+	{
+		LPCSTR error_text = lua_tostring(L, -1);
+		Msg("! [LC_SPOT] lua call failed: alife_storage_manager.get_state() err=%s",
+			error_text ? error_text : "<no error text>");
+		lua_settop(L, top);
+		return false;
+	}
+
+	if (!lua_istable(L, -1))
+	{
+		lua_settop(L, top);
+		return false;
+	}
+
+	lua_getfield(L, -1, "opened_routes");
+	result = lua_toboolean(L, -1) != 0;
+	lua_settop(L, top);
+	return true;
+}
+
+static bool is_route_open_for_story_name(LPCSTR story_name)
+{
+	if (!story_name || !*story_name)
+		return false;
+
+	bool value = false;
+	if (lua_table_bool_func_1arg("txr_routes", "scan_route", story_name, value) && value)
+		return true;
+
+	string256 route_key;
+	xr_sprintf(route_key, "routes_%s", story_name);
+	if (lua_table_bool_func_1arg("mlr_utils", "load_var", route_key, value) && value)
+		return true;
+
+	if (lua_alife_opened_routes_flag(value) && value)
+		return true;
+
+	return false;
+}
+
+static bool ensure_level_changer_spot_from_route_state(u16 id, LPCSTR spot_type)
+{
+	if (!is_level_changer_spot(spot_type))
+		return false;
+
+	if (id == 0 || id == u16(-1))
+		return false;
+
+	if (Level().MapManager().HasMapLocation(spot_type, id) != 0)
+		return true;
+
+	const CALifeSimulator* sim = ai().get_alife();
+	if (!sim)
+		return false;
+
+	CSE_ALifeDynamicObject* se_object = sim->objects().object(id, true);
+	if (!se_object)
+		return false;
+
+	LPCSTR story_name = se_object->name_replace();
+	if (!story_name || !*story_name)
+		story_name = se_object->name();
+	if (!story_name || !*story_name)
+		return false;
+
+	// txr_routes default open logic is keyed by space_restrictor story names.
+	if (!strstr(story_name, "space_restrictor_to_"))
+		return false;
+
+	if (!is_route_open_for_story_name(story_name))
+		return false;
+
+	CMapLocation* ml = Level().MapManager().AddMapLocation(spot_type, id);
+	if (!ml)
+		return false;
+
+	ml->SetSerializable(true);
+	Msg("* [LC_SPOT] route-open add id=%hu spot=%s story=%s", id, spot_type ? spot_type : "<null>", story_name);
+	return true;
+}
+
 void map_add_object_spot(u16 id, LPCSTR spot_type, LPCSTR text)
 {
+	if (is_level_changer_spot(spot_type))
+		sync_story_objects_lua_from_alife_once("map_add_object_spot(level_changer)");
+
+	if (is_level_changer_spot(spot_type) && (id == 0 || id == u16(-1)))
+	{
+		dump_story_objects_state_once("map_add_object_spot(level_changer, id=0)");
+		const u32 added = add_level_changer_spot_fallback(spot_type, text, false);
+		Msg("* [LC_SPOT] fallback result (non-ser) src_id=%hu spot=%s added=%u",
+			id,
+			spot_type ? spot_type : "<null>",
+			added);
+		return;
+	}
+
 	CMapLocation* ml = Level().MapManager().AddMapLocation(spot_type, id);
+	if (!ml)
+	{
+		if (is_level_changer_spot(spot_type))
+			Msg("! [LC_SPOT] add failed id=%hu spot=%s", id, spot_type ? spot_type : "<null>");
+		return;
+	}
+
 	if (xr_strlen(text))
 	{
 		ml->SetHint(text);
+	}
+
+	if (is_level_changer_spot(spot_type))
+	{
+		CObject* object = Level().Objects.net_Find(id);
+		Msg("* [LC_SPOT] add id=%hu spot=%s hint=%s has_obj=%d obj_name=%s",
+			id,
+			spot_type ? spot_type : "<null>",
+			(text && xr_strlen(text)) ? text : "<empty>",
+			object ? 1 : 0,
+			object ? object->cName().c_str() : "<none>");
 	}
 }
 
 void map_add_object_spot_ser(u16 id, LPCSTR spot_type, LPCSTR text)
 {
+	if (is_level_changer_spot(spot_type))
+		sync_story_objects_lua_from_alife_once("map_add_object_spot_ser(level_changer)");
+
+	if (is_level_changer_spot(spot_type) && (id == 0 || id == u16(-1)))
+	{
+		dump_story_objects_state_once("map_add_object_spot_ser(level_changer, id=0)");
+		const u32 added = add_level_changer_spot_fallback(spot_type, text, true);
+		Msg("* [LC_SPOT] fallback result (ser) src_id=%hu spot=%s added=%u",
+			id,
+			spot_type ? spot_type : "<null>",
+			added);
+		return;
+	}
+
+	if (is_sleep_location_spot(spot_type))
+	{
+		if (id == 0 || id == u16(-1))
+		{
+			Msg("! [PDA_SLEEP_SPOT] add_ser skipped: invalid id=%hu", id);
+			const u32 added = add_sleep_spots_from_level_objects_fallback(text);
+			Msg("* [PDA_SLEEP_SPOT] fallback result added=%u", added);
+			return;
+		}
+
+		CObject* object = Level().Objects.net_Find(id);
+		if (!object)
+		{
+			Msg("! [PDA_SLEEP_SPOT] add_ser: no level object found for id=%hu", id);
+			const u32 added = add_sleep_spots_from_level_objects_fallback(text);
+			if (added)
+				Msg("* [PDA_SLEEP_SPOT] fallback result added=%u", added);
+			return;
+		}
+	}
+
 	CMapLocation* ml = Level().MapManager().AddMapLocation(spot_type, id);
+	if (!ml)
+		return;
+
 	if (xr_strlen(text))
 		ml->SetHint(text);
 
 	ml->SetSerializable(true);
+
+	if (is_level_changer_spot(spot_type))
+	{
+		CObject* object = Level().Objects.net_Find(id);
+		Msg("* [LC_SPOT] add_ser id=%hu spot=%s hint=%s has_obj=%d obj_name=%s",
+			id,
+			spot_type ? spot_type : "<null>",
+			(text && xr_strlen(text)) ? text : "<empty>",
+			object ? 1 : 0,
+			object ? object->cName().c_str() : "<none>");
+	}
 }
 
 void map_change_spot_hint(u16 id, LPCSTR spot_type, LPCSTR text)
@@ -433,7 +853,33 @@ luabind::object map_get_object_spots_by_id(u16 id)
 
 u16 map_has_object_spot(u16 id, LPCSTR spot_type)
 {
-	return Level().MapManager().HasMapLocation(spot_type, id);
+	if (is_sleep_location_spot(spot_type) && (id == 0 || id == u16(-1)))
+		return has_any_sleep_spot_on_map() ? 1 : 0;
+
+	if (is_level_changer_spot(spot_type))
+		sync_story_objects_lua_from_alife_once("map_has_object_spot(level_changer)");
+
+	u16 has = Level().MapManager().HasMapLocation(spot_type, id);
+	if (!has && is_level_changer_spot(spot_type))
+	{
+		if (ensure_level_changer_spot_from_route_state(id, spot_type))
+			has = Level().MapManager().HasMapLocation(spot_type, id);
+	}
+
+	if (is_level_changer_spot(spot_type))
+	{
+		dump_story_objects_state_once("map_has_object_spot(level_changer)");
+
+		CObject* object = Level().Objects.net_Find(id);
+		Msg("* [LC_SPOT] has id=%hu spot=%s result=%hu has_obj=%d obj_name=%s",
+			id,
+			spot_type ? spot_type : "<null>",
+			has,
+			object ? 1 : 0,
+			object ? object->cName().c_str() : "<none>");
+	}
+
+	return has;
 }
 
 bool patrol_path_exists(LPCSTR patrol_path)

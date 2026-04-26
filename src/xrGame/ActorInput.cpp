@@ -26,6 +26,7 @@
 #include "CharacterPhysicsSupport.h"
 #include "InventoryBox.h"
 #include "player_hud.h"
+#include "space_restrictor.h"
 #include "../xrEngine/xr_input.h"
 #include "flare.h"
 #include "CustomDetector.h"
@@ -39,6 +40,7 @@
 #include "CustomOutfit.h"
 #include "3rd party/luabind/luabind/luabind.hpp"
 #include "weapon_trace.h"
+#include "script_game_object.h"
 
 extern u32 hud_adj_mode;
 
@@ -75,6 +77,15 @@ static LPCSTR WeaponTraceActionName(int cmd)
 
 namespace
 {
+bool IsDoorObject(const CGameObject* object)
+{
+	if (!object)
+		return false;
+
+	const CScriptGameObject* script_object = object->lua_game_object();
+	return script_object && script_object->m_door;
+}
+
 bool IsMPActorSectionName(const CGameObject* object)
 {
 	return object && (xr_strcmp(object->cNameSect().c_str(), "mp_actor") == 0);
@@ -85,6 +96,92 @@ bool IsMPActorTalkBlocked(const CActor* actor, const CInventoryOwner* partner)
 	const CGameObject* actor_object = smart_cast<const CGameObject*>(actor);
 	const CGameObject* partner_object = smart_cast<const CGameObject*>(partner);
 	return IsMPActorSectionName(actor_object) && IsMPActorSectionName(partner_object);
+}
+
+bool IsKnownSleepZoneName(LPCSTR object_name)
+{
+	if (!object_name || !*object_name)
+		return false;
+
+	static LPCSTR kSleepZones[] = {
+		"actor_surge_hide_2",
+		"agr_army_sleep",
+		"agr_sr_sleep_tunnel",
+		"agr_sr_sleep_wagon",
+		"bar_actor_sleep_zone",
+		"cit_merc_sleep",
+		"ds_farmhouse_sleep",
+		"esc_basement_sleep_area",
+		"esc_secret_sleep",
+		"gar_angar_sleep",
+		"gar_dolg_sleep",
+		"jup_a6_sr_sleep",
+		"mar_a3_sr_sleep",
+		"mil_freedom_sleep",
+		"mil_smart_terran_2_4_sleep",
+		"pri_a16_sr_sleep",
+		"pri_monolith_sleep",
+		"pri_room27_sleep",
+		"rad_sleep_room",
+		"ros_vagon_sleep",
+		"val_abandoned_house_sleep",
+		"val_vagon_sleep",
+		"yan_bunker_sleep_restrictor",
+		"zat_a2_sr_sleep",
+		"pol_secret_sleep"
+	};
+
+	for (LPCSTR sleep_zone : kSleepZones)
+	{
+		if (0 == xr_strcmp(object_name, sleep_zone))
+			return true;
+	}
+
+	return false;
+}
+
+bool TryUseSleepZoneFallback(CActor* actor, CGameObject* object)
+{
+	if (!actor)
+		return false;
+
+	LPCSTR object_name = "<nearby>";
+	u16 object_id = u16(-1);
+	if (object)
+	{
+		if (!smart_cast<CSpaceRestrictor*>(object))
+			return false;
+
+		object_name = object->cName().c_str();
+		object_id = object->ID();
+		if (!IsKnownSleepZoneName(object_name))
+			return false;
+	}
+
+	::luabind::functor<void> sleeper_use;
+	if (!ai().script_engine().functor("ui_sleep_dialog.sleep_in_zone", sleeper_use))
+	{
+		Msg("! [SLEEP_FALLBACK] missing functor ui_sleep_dialog.sleep_in_zone for [%s][%hu]", object_name, object_id);
+		return false;
+	}
+
+	CScriptGameObject* actor_lua = actor->lua_game_object();
+	CScriptGameObject* object_lua = object ? object->lua_game_object() : actor_lua;
+	if (!actor_lua || !object_lua)
+		return false;
+
+	try
+	{
+		sleeper_use(actor_lua, object_lua);
+		Msg("* [SLEEP_FALLBACK] invoked for [%s][%hu]", object_name, object_id);
+		return true;
+	}
+	catch (...)
+	{
+		Msg("! [SLEEP_FALLBACK] invoke failed for [%s][%hu]", object_name, object_id);
+	}
+
+	return false;
 }
 }
 
@@ -734,6 +831,11 @@ bool CActor::use_Holder(CHolderCustom* holder)
 
 void CActor::ActorUse()
 {
+	static u32 s_last_door_use_time = 0;
+	static u16 s_last_door_use_id = u16(-1);
+
+	bool used_script_use = false;
+
 	if (m_holder)
 	{
 		CGameObject* GO = smart_cast<CGameObject*>(m_holder);
@@ -751,9 +853,21 @@ void CActor::ActorUse()
 		character_physics_support()->movement()->PHReleaseObject();
 
 
-	if (m_pUsableObject && NULL == m_pObjectWeLookingAt->cast_inventory_item())
+	if (m_pUsableObject && m_pObjectWeLookingAt && NULL == m_pObjectWeLookingAt->cast_inventory_item())
 	{
-		m_pUsableObject->use(this);
+		if (IsDoorObject(m_pObjectWeLookingAt))
+		{
+			const u32 now = Device.dwTimeGlobal;
+			if (s_last_door_use_id == m_pObjectWeLookingAt->ID() && (now - s_last_door_use_time) < 250)
+				return;
+		}
+
+		used_script_use = m_pUsableObject->use(this);
+		if (used_script_use && IsDoorObject(m_pObjectWeLookingAt))
+		{
+			s_last_door_use_id = m_pObjectWeLookingAt->ID();
+			s_last_door_use_time = Device.dwTimeGlobal;
+		}
 	}
 
 	if (m_pInvBoxWeLookingAt && m_pInvBoxWeLookingAt->nonscript_usable())
@@ -840,6 +954,11 @@ void CActor::ActorUse()
 			}
 		}
 	}
+
+	// Final fallback for sleeping zones: when no actionable object is targeted,
+	// or when the targeted object is a sleep restrictor without a working use callback.
+	if (!used_script_use && (!m_pObjectWeLookingAt || smart_cast<CSpaceRestrictor*>(m_pObjectWeLookingAt)))
+		TryUseSleepZoneFallback(this, m_pObjectWeLookingAt);
 }
 extern BOOL firstPersonDeath;
 BOOL CActor::HUDview() const

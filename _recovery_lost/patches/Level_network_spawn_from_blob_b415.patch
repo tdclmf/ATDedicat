@@ -1,0 +1,33 @@
+diff --git a/src/xrGame/Level_network_spawn.cpp b/_recovery_lost/blob_b415.cpp
+index 3073d656..27df596d 100644
+--- a/src/xrGame/Level_network_spawn.cpp
++++ b/_recovery_lost/blob_b415.cpp
+@@ -100,14 +100,15 @@ void CLevel::g_sv_Spawn(CSE_Abstract* E)
+ 	//	Msg					("* CLIENT: Spawn: %s, ID=%d", *E->s_name, E->ID);
+ #endif
+ 
+-	// Dedicated single: keep system actor object alive on the server side
+-	// to provide a real db.actor context for script packs.
++	// Dedicated single: don't create local client actor objects at all.
++	// Server-side entities still exist in xrServer, we only skip CObject instantiation.
+ 	if (g_dedicated_server && Game().Type() == eGameIDSingle)
+ 	{
+ 		CSE_ALifeCreatureActor* actor = smart_cast<CSE_ALifeCreatureActor*>(E);
+-		if (actor && E->ID == 0)
++		if (actor)
+ 		{
+-			Msg("--- [SV] Dedicated single: initializing server db.actor from system actor [%s][%u].", E->name_replace(), E->ID);
++			Msg("--- [SV] Dedicated single: skipping local actor object spawn for [%s][%u].", E->name_replace(), E->ID);
++			return;
+ 		}
+ 	}
+ 
+@@ -235,7 +236,7 @@ CSE_Abstract* CLevel::spawn_item(LPCSTR section, const Fvector& position, u32 le
+ 			dynamic_object->m_tGraphID = ai().cross_table().vertex(level_vertex_id).game_vertex_id();
+ 	}
+ 
+-	//?????? ??????? ? ?????? ?????????
++	//?????? ??????? ? ?????? ?????????
+ 	CSE_ALifeItemWeapon* weapon = smart_cast<CSE_ALifeItemWeapon*>(abstract);
+ 	if (weapon)
+ 		weapon->a_elapsed = weapon->get_ammo_magsize();

@@ -234,13 +234,37 @@ void dxEnvironmentRender::OnFrame(CEnvironment& env)
 	}
 
 	//. Setup skybox textures, somewhat ugly
-	ID3DBaseTexture* e0 = mixRen.sky_r_textures[0].second->surface_get();
-	ID3DBaseTexture* e1 = mixRen.sky_r_textures[1].second->surface_get();
+	ID3DBaseTexture* e0 = nullptr;
+	ID3DBaseTexture* e1 = nullptr;
 
-	tsky0->surface_set(e0);
-	_RELEASE(e0);
-	tsky1->surface_set(e1);
-	_RELEASE(e1);
+	if (mixRen.sky_r_textures.size() > 0 && mixRen.sky_r_textures[0].second)
+		e0 = mixRen.sky_r_textures[0].second->surface_get();
+	if (mixRen.sky_r_textures.size() > 1 && mixRen.sky_r_textures[1].second)
+		e1 = mixRen.sky_r_textures[1].second->surface_get();
+
+	// Keep sky samplers valid even when one blend texture is missing
+	// (e.g. broken/incomplete weather descriptor during emission transitions).
+	if (!e0 && e1)
+	{
+		e0 = e1;
+		e0->AddRef();
+	}
+	if (!e1 && e0)
+	{
+		e1 = e0;
+		e1->AddRef();
+	}
+
+	if (e0)
+	{
+		tsky0->surface_set(e0);
+		_RELEASE(e0);
+	}
+	if (e1)
+	{
+		tsky1->surface_set(e1);
+		_RELEASE(e1);
+	}
 
 	// ******************** Environment params (setting)
 #if defined(USE_DX10) || defined(USE_DX11)

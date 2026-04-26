@@ -8,9 +8,26 @@
 #include "level.h"
 #include "ai_space.h"
 #include "alife_object_registry.h"
+#include "alife_registry_wrappers.h"
 #include "xrServer_Objects_ALife_Items.h"
 #include "xrServer_Objects_ALife_Monsters.h"
+#include "infoportion.h"
 #include "weapon_trace.h"
+#include "InventoryOwner.h"
+#include <algorithm>
+
+namespace
+{
+IC bool is_companion_info_id(LPCSTR info_id)
+{
+	if (!info_id || !*info_id)
+		return false;
+
+	return
+		(0 == strncmp(info_id, "npcx_", 5)) ||
+		(0 == xr_strcmp(info_id, "npcx_is_companion"));
+}
+}
 
 void xrServer::Process_event(NET_Packet& P, ClientID sender)
 {
@@ -29,6 +46,7 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 	// read generic info
 	P.r_u16(type);
 	P.r_u16(destination);
+	const u32 payload_pos = P.r_tell();
 
 	CSE_Abstract* receiver = game->get_entity_from_eid(destination);
 	if (receiver)
@@ -47,6 +65,85 @@ void xrServer::Process_event(NET_Packet& P, ClientID sender)
 		}
 		break;
 	case GE_INFO_TRANSFER:
+		{
+			P.r_seek(payload_pos);
+
+			u16 source_id = u16(-1);
+			shared_str info_id;
+			u8 add_info = 0;
+			P.r_u16(source_id);
+			P.r_stringZ(info_id);
+			P.r_u8(add_info);
+
+			if (is_companion_info_id(*info_id))
+			{
+				CInventoryOwner* runtime_owner = nullptr;
+				auto* runtime_obj = Level().Objects.net_Find(destination);
+				if (runtime_obj)
+					runtime_owner = smart_cast<CInventoryOwner*>(runtime_obj);
+
+				const int runtime_before = runtime_owner ? (runtime_owner->HasInfo(info_id) ? 1 : 0) : -1;
+
+				const CALifeSimulator* sim = ai().get_alife();
+				if (sim)
+				{
+					CInfoPortionRegistry& info_registry = sim->registry((CInfoPortionRegistry*)nullptr);
+					KNOWN_INFO_VECTOR* known_info = info_registry.object(destination, true);
+					if (!known_info)
+					{
+						KNOWN_INFO_VECTOR empty_info;
+						info_registry.add(destination, empty_info, true);
+						known_info = info_registry.object(destination, true);
+					}
+					if (known_info)
+					{
+						KNOWN_INFO_VECTOR_IT it = std::find_if(known_info->begin(), known_info->end(), CFindByIDPred(info_id));
+						if (add_info)
+						{
+							if (it == known_info->end())
+								known_info->push_back(info_id);
+						}
+						else
+						{
+							if (it != known_info->end())
+								known_info->erase(it);
+						}
+
+						Msg("* [COMP_SV_SYNC] dst=%u src=%u info=%s add=%u size=%u",
+							destination, source_id, *info_id, u32(add_info), u32(known_info->size()));
+					}
+					else
+					{
+						Msg("! [COMP_SV_SYNC] no info registry for dst=%u info=%s add=%u",
+							destination, *info_id, u32(add_info));
+					}
+				}
+				else
+				{
+					Msg("! [COMP_SV_SYNC] no ALife for dst=%u info=%s add=%u",
+						destination, *info_id, u32(add_info));
+				}
+
+				// Runtime companion behavior (follow/wait/etc.) depends on the InventoryOwner info state.
+				// Keep runtime object in sync with the server-side transfer in hybrid/client-server mode.
+				if (runtime_owner)
+				{
+					if (add_info)
+						runtime_owner->OnReceiveInfo(info_id);
+					else
+						runtime_owner->OnDisableInfo(info_id);
+				}
+
+				const int runtime_after = runtime_owner ? (runtime_owner->HasInfo(info_id) ? 1 : 0) : -1;
+				Msg("* [COMP_SV_RUNTIME] dst=%u info=%s add=%u has_before=%d has_after=%d runtime_obj=%d",
+					destination, *info_id, u32(add_info), runtime_before, runtime_after, runtime_owner ? 1 : 0);
+			}
+
+			// Keep packet read cursor consistent for downstream handling/broadcast.
+			P.r_seek(payload_pos);
+			SendBroadcast(BroadcastCID, P, MODE);
+		}
+		break;
 	case GE_WPN_STATE_CHANGE:
 	case GE_ZONE_STATE_CHANGE:
 	case GE_ACTOR_JUMPING:

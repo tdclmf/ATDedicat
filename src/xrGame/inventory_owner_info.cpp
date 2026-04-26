@@ -17,6 +17,18 @@
 #include "alife_registry_wrappers.h"
 #include "script_callback_ex.h"
 #include "game_object_space.h"
+namespace
+{
+IC bool is_companion_info_id(LPCSTR info_id)
+{
+	if (!info_id || !*info_id)
+		return false;
+
+	return
+		(0 == strncmp(info_id, "npcx_", 5)) ||
+		(0 == xr_strcmp(info_id, "npcx_is_companion"));
+}
+}
 
 void CInventoryOwner::OnEvent(NET_Packet& P, u16 type)
 {
@@ -99,6 +111,16 @@ void CInventoryOwner::TransferInfo(shared_str info_id, bool add_info) const
 	const CObject* pThisObject = smart_cast<const CObject*>(this);
 	VERIFY(pThisObject);
 
+	const bool companion_info = is_companion_info_id(*info_id);
+	if (companion_info)
+	{
+		Msg("* [COMP_CMD] TransferInfo begin obj=[%s][%u] info=%s add=%d",
+			pThisObject->cName().c_str(),
+			u32(pThisObject->ID()),
+			*info_id,
+			add_info ? 1 : 0);
+	}
+
 	//отправляем от нашему PDA пакет информации с номером
 	NET_Packet P;
 	CGameObject::u_EventGen(P, GE_INFO_TRANSFER, pThisObject->ID());
@@ -114,6 +136,39 @@ void CInventoryOwner::TransferInfo(shared_str info_id, bool add_info) const
 			OnReceiveInfo(info_id);
 		else
 			OnDisableInfo(info_id);
+	}
+
+	if (companion_info)
+	{
+		const CALifeSimulator* sim = ai().get_alife();
+		if (sim)
+		{
+			KNOWN_INFO_VECTOR* known_info = sim->registry(info_portions).object(pThisObject->ID(), true);
+			if (known_info)
+			{
+				KNOWN_INFO_VECTOR_IT it = std::find_if(known_info->begin(), known_info->end(), CFindByIDPred(info_id));
+				if (add_info)
+				{
+					if (it == known_info->end())
+						known_info->push_back(info_id);
+				}
+				else
+				{
+					if (it != known_info->end())
+						known_info->erase(it);
+				}
+			}
+		}
+	}
+
+	if (companion_info)
+	{
+		Msg("* [COMP_CMD] TransferInfo end obj=[%s][%u] info=%s add=%d has_now=%d",
+			pThisObject->cName().c_str(),
+			u32(pThisObject->ID()),
+			*info_id,
+			add_info ? 1 : 0,
+			HasInfo(info_id) ? 1 : 0);
 	}
 }
 

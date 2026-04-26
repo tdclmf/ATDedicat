@@ -18,21 +18,6 @@
 #include "ai_sounds.h"
 #include "Inventory.h"
 
-namespace
-{
-CUIPdaWnd* GetSafePdaMenu(CPda* pda_owner)
-{
-	if (!pda_owner || g_dedicated_server || !OnClient())
-		return nullptr;
-
-	CUIGameCustom* game_ui = CurrentGameUI();
-	if (!game_ui || !game_ui->UIMainIngameWnd)
-		return nullptr;
-
-	return &game_ui->GetPdaMenu();
-}
-}
-
 CPda::CPda(void)
 {
 	m_idOriginalOwner = u16(-1);
@@ -47,8 +32,6 @@ CPda::CPda(void)
 	m_fLR_InertiaFactor = 0.f;
 	m_fUD_InertiaFactor = 0.f;
 	m_bNoticedEmptyBattery = false;
-	play_release_snd = false;
-	play_press_snd = false;
 	m_PdaEnabled = true;
 }
 
@@ -130,8 +113,7 @@ void CPda::OnStateSwitch(u32 S, u32 oldState)
 	{
 	case eShowing:
 	{
-		if (g_player_hud)
-			g_player_hud->attach_item(this);
+		g_player_hud->attach_item(this);
 		g_pGamePersistent->pda_shader_data.pda_display_factor = 0.f;
 
 		m_sounds.PlaySound(hasEnoughBatteryPower() ? "sndShow" : "sndShowEmpty", Position(), H_Root(), !!GetHUDmode(), false);
@@ -149,13 +131,9 @@ void CPda::OnStateSwitch(u32 S, u32 oldState)
 			PlayHUDMotion(!m_bNoticedEmptyBattery ? "anm_hide" : "anm_hide_empty", TRUE, this, GetState());
 			SetPending(TRUE);
 			m_bZoomed = false;
-			if (CUIPdaWnd* pda = GetSafePdaMenu(this))
-			{
-				pda->Enable(false);
-				pda->ResetJoystick(false);
-			}
-			if (g_player_hud)
-				g_player_hud->reset_thumb(false);
+			CurrentGameUI()->GetPdaMenu().Enable(false);
+			g_player_hud->reset_thumb(false);
+			CurrentGameUI()->GetPdaMenu().ResetJoystick(false);
 			if (joystick != BI_NONE)
 				HudItemData()->m_model->LL_GetBoneInstance(joystick).reset_callback();
 			target_screen_switch = Device.fTimeGlobal + m_screen_off_delay;
@@ -168,21 +146,18 @@ void CPda::OnStateSwitch(u32 S, u32 oldState)
 		{
 			m_bZoomed = false;
 			m_fZoomfactor = 0.f;
-			if (CUIPdaWnd* pda = GetSafePdaMenu(this))
-			{
-				if (pda->IsShown())
-				{
-					if (!psActorFlags.test(AF_3D_PDA))
-						pda->Enable(true);
-					else
-						pda->HideDialog();
-				}
+			CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 
-				pda->ResetJoystick(true);
+			if (pda->IsShown())
+			{
+				if (!psActorFlags.test(AF_3D_PDA))
+					pda->Enable(true);
+				else
+					pda->HideDialog();
 			}
 
-			if (g_player_hud)
-				g_player_hud->reset_thumb(true);
+			g_player_hud->reset_thumb(true);
+			pda->ResetJoystick(true);
 		}
 		SetPending(FALSE);
 	}
@@ -232,8 +207,7 @@ void CPda::OnAnimationEnd(u32 state)
 	{
 		SetPending(FALSE);
 		SwitchState(eHidden);
-		if (ParentIsActor() && g_player_hud)
-			g_player_hud->detach_item(this);
+		g_player_hud->detach_item(this);
 	}
 	break;
 	case eEmptyBattery:
@@ -248,9 +222,7 @@ void CPda::OnAnimationEnd(u32 state)
 void CPda::JoystickCallback(CBoneInstance* B)
 {
 	CPda* Pda = static_cast<CPda*>(B->callback_param());
-	CUIPdaWnd* pda = GetSafePdaMenu(Pda);
-	if (!pda)
-		return;
+	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 
 	static float fAvgTimeDelta = Device.fTimeDelta;
 	fAvgTimeDelta = _inertion(fAvgTimeDelta, Device.fTimeDelta, 0.8f);
@@ -281,9 +253,9 @@ void CPda::JoystickCallback(CBoneInstance* B)
 		press += diff;
 
 		if (prev_press == 0.f && press < 0.f)
-			Pda->play_press_snd = true;
+			Pda->m_sounds.PlaySound("sndButtonPress", B->mTransform.c, Pda->H_Root(), !!Pda->GetHUDmode());
 		else if (prev_press < -.001f && press >= -.001f)
-			Pda->play_release_snd = true;
+			Pda->m_sounds.PlaySound("sndButtonRelease", B->mTransform.c, Pda->H_Root(), !!Pda->GetHUDmode());
 	}
 	else
 		press = target_press;
@@ -311,32 +283,13 @@ extern bool IsMainMenuActive();
 void CPda::UpdateCL()
 {
 	inherited::UpdateCL();
-	if (g_dedicated_server || !OnClient())
+
+	if (!ParentIsActor() || Actor()->inventory().ActiveItem() != this)
 		return;
-
-	if (!ParentIsActor() || !Actor())
-		return;
-
-	if (Actor()->inventory().ActiveItem() != this)
-		return;
-
-	if (play_press_snd)
-	{
-		m_sounds.PlaySound("sndButtonPress", GetHUDmode() ? zero_vel : Position(), H_Root(), GetHUDmode());
-		play_press_snd = false;
-	}
-
-	if (play_release_snd)
-	{
-		m_sounds.PlaySound("sndButtonRelease", GetHUDmode() ? zero_vel : Position(), H_Root(), GetHUDmode());
-		play_release_snd = false;
-	}
 
 	// For battery icon
 	float condition = GetCondition();
-	CUIPdaWnd* pda = GetSafePdaMenu(this);
-	if (!pda)
-		return;
+	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 	pda->m_power = condition;
 
 	if (!psActorFlags.test(AF_3D_PDA))
@@ -382,7 +335,7 @@ void CPda::UpdateCL()
 			{
 				if (!m_bPowerSaving)
 				{
-					luabind::functor<void> funct;
+					::luabind::functor<void> funct;
 					if (ai().script_engine().functor("pda.on_low_battery", funct))
 						funct();
 					m_bPowerSaving = true;
@@ -472,9 +425,7 @@ void CPda::OnMovementChanged(ACTOR_DEFS::EMoveCommand cmd)
 		CEntity::SEntityState st;
 		Actor()->g_State(st);
 
-		CUIPdaWnd* pda = GetSafePdaMenu(this);
-		if (!pda)
-			return;
+		CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 		if (pda->IsShown() && pda->IsEnabled() && st.bSprint)
 		{
 			m_bZoomed = false;
@@ -485,9 +436,7 @@ void CPda::OnMovementChanged(ACTOR_DEFS::EMoveCommand cmd)
 
 bool CPda::Action(u16 cmd, u32 flags)
 {
-	CUIPdaWnd* pda = GetSafePdaMenu(this);
-	if (!pda)
-		return inherited::Action(cmd, flags);
+	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 
 	switch (cmd)
 	{
@@ -559,8 +508,7 @@ bool CPda::Action(u16 cmd, u32 flags)
 					pda->HideDialog();
 				}
 
-				if (CUIGameCustom* game_ui = CurrentGameUI())
-					game_ui->ShowActorMenu();
+				CurrentGameUI()->ShowActorMenu();
 				return true;
 			}
 		}
@@ -576,19 +524,18 @@ void CPda::OnMoveToRuck(const SInvItemPlace& prev)
 	if (!ParentIsActor())
 		return;
 
+	if (g_dedicated_server || !OnClient() || !CurrentGameUI() || !g_player_hud)
+		return;
+
 	if (prev.type == eItemPlaceSlot)
 	{
 		SwitchState(eHidden);
 		if (joystick != BI_NONE)
 			HudItemData()->m_model->LL_GetBoneInstance(joystick).reset_callback();
-		if (ParentIsActor() && g_player_hud)
-			g_player_hud->detach_item(this);
+		g_player_hud->detach_item(this);
 	}
-	if (CUIPdaWnd* pda = GetSafePdaMenu(this))
-	{
-		if (pda->IsShown())
-			pda->HideDialog();
-	}
+	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
+	if (pda->IsShown()) pda->HideDialog();
 	StopCurrentAnimWithoutCallback();
 	SetPending(FALSE);
 }
@@ -596,16 +543,16 @@ void CPda::OnMoveToRuck(const SInvItemPlace& prev)
 void CPda::UpdateHudAdditional(Fmatrix& trans)
 {
 	CActor* pActor = smart_cast<CActor*>(H_Parent());
-	if (!pActor || !ParentIsActor() || g_dedicated_server)
+	if (!pActor)
 		return;
 
 	attachable_hud_item* hi = HudItemData();
 
-	if (pActor->cam_freelook == eflEnabled || pActor->cam_freelook == eflEnabling || (g_player_hud && g_player_hud->script_anim_part != u8(-1)))
+	if (pActor->cam_freelook == eflEnabled || pActor->cam_freelook == eflEnabling || g_player_hud->script_anim_part != u8(-1))
 	{
-		CUIPdaWnd* pda = GetSafePdaMenu(this);
+		CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 
-		if (pda && pda->IsEnabled())
+		if (pda->IsEnabled())
 		{
 			if (m_bZoomed)
 			{
@@ -712,7 +659,7 @@ void CPda::UpdateHudAdditional(Fmatrix& trans)
 
 	clamp(m_fZoomfactor, 0.f, 1.f);
 
-	if (!g_player_hud || !g_player_hud->inertion_allowed())
+	if (!g_player_hud->inertion_allowed())
 		return;
 
 	static float fAvgTimeDelta = Device.fTimeDelta;
@@ -1072,7 +1019,7 @@ void CPda::OnH_B_Independent(bool just_before_destroy)
 	inherited::OnH_B_Independent(just_before_destroy);
 	TurnOff();
 
-	if (!ParentIsActor() || !g_player_hud || !g_player_hud->attached_item(0))
+	if (!ParentIsActor() || !g_player_hud->attached_item(0))
 		return;
 
 	if (g_player_hud->attached_item(0)->m_parent_hud_item != this)
@@ -1085,13 +1032,10 @@ void CPda::OnH_B_Independent(bool just_before_destroy)
 	m_bZoomed = false;
 	m_fZoomfactor = 0.f;
 
-	if (CUIPdaWnd* pda = GetSafePdaMenu(this))
-	{
-		if (pda->IsShown())
-			pda->HideDialog();
-		g_player_hud->reset_thumb(true);
-		pda->ResetJoystick(true);
-	}
+	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
+	if (pda->IsShown()) pda->HideDialog();
+	g_player_hud->reset_thumb(true);
+	pda->ResetJoystick(true);
 
 	if (joystick != BI_NONE)
 		HudItemData()->m_model->LL_GetBoneInstance(joystick).reset_callback();
@@ -1147,7 +1091,7 @@ void CPda::PlayScriptFunction()
 {
 	if (xr_strcmp(m_functor_str, ""))
 	{
-		luabind::functor<void> m_functor;
+		::luabind::functor<void> m_functor;
 		R_ASSERT(ai().script_engine().functor(m_functor_str.c_str(), m_functor));
 		m_functor();
 	}

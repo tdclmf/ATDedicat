@@ -77,6 +77,23 @@ CSE_ALifeDynamicObject* alife_story_object(const CALifeSimulator* self, ALife::_
 	return (self->story_objects().object(id, true));
 }
 
+CSE_ALifeDynamicObject* alife_story_object(const CALifeSimulator* self, LPCSTR story_name)
+{
+	VERIFY(self);
+
+	if (!story_name || !*story_name)
+		return 0;
+
+	// First try the canonical "story_ids" table when available.
+	if (pGameIni && pGameIni->section_exist("story_ids") && pGameIni->line_exist("story_ids", story_name))
+	{
+		const ALife::_STORY_ID sid = ALife::_STORY_ID(atoi(pGameIni->r_string("story_ids", story_name)));
+		return alife_story_object(self, sid);
+	}
+
+	return 0;
+}
+
 template <typename _id_type>
 void generate_story_ids(
 	STORY_PAIRS& result,
@@ -487,6 +504,7 @@ void CALifeSimulator::script_register(lua_State* L)
 		.def("object", (CSE_ALifeDynamicObject *(*)(const CALifeSimulator*, ALife::_OBJECT_ID, bool))(alife_object))
 // FIX LATER:		.def("objects", &alife_objects, return_stl_pair_iterator)
 		.def("story_object", (CSE_ALifeDynamicObject *(*)(const CALifeSimulator*, ALife::_STORY_ID))(alife_story_object))
+		.def("story_object", (CSE_ALifeDynamicObject *(*)(const CALifeSimulator*, LPCSTR))(alife_story_object))
 		.def("set_switch_online", (void (CALifeSimulator::*)(ALife::_OBJECT_ID, bool))(&CALifeSimulator::set_switch_online))
 		.def("set_switch_offline", (void (CALifeSimulator::*)(ALife::_OBJECT_ID, bool))(&CALifeSimulator::set_switch_offline))
 		.def("set_interactive", (void (CALifeSimulator::*)(ALife::_OBJECT_ID, bool))(&CALifeSimulator::set_interactive))

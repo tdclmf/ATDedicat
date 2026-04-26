@@ -20,6 +20,9 @@
 #include "screenshot_server.h"
 #include "xrServer_info.h"
 #include "weapon_trace.h"
+#include "alife_registry_wrappers.h"
+#include "infoportion.h"
+#include "InventoryOwner.h"
 #include <functional>
 
 #pragma warning(push)
@@ -304,12 +307,18 @@ void xrServer::MakeUpdatePackets()
 	NET_Packet tmpPacket;
 	u32 position;
 	static u32 s_ds_single_update_log_time = 0;
+	static u32 s_sp_local_update_log_time = 0;
+	static xr_hash_map<u16, Fvector> s_sp_stalker_last_positions;
 
 	m_updator.begin_updates();
 	const bool dedicated_single_authoritative =
-		g_dedicated_server &&
 		game &&
 		(game->Type() == eGameIDSingle);
+	const bool singleplayer_local_diag =
+		!g_dedicated_server &&
+		game &&
+		(game->Type() == eGameIDSingle);
+	const bool emit_sp_diag_log = singleplayer_local_diag && (Device.dwTimeGlobal >= s_sp_local_update_log_time);
 
 	u32 considered_relevant = 0;
 	u32 skipped_owner = 0;
@@ -318,6 +327,12 @@ void xrServer::MakeUpdatePackets()
 	u32 ownerless_written = 0;
 	u32 forced_world_sync_relevant = 0;
 	u32 world_sync_entities_seen = 0;
+	u32 sp_stalkers_online = 0;
+	u32 sp_stalkers_native_relevant = 0;
+	u32 sp_stalkers_written = 0;
+	u32 sp_stalkers_moved = 0;
+	xr_vector<xr_string> sp_stalker_samples;
+	xr_vector<xr_string> sp_fanat_samples;
 
 	xrS_entities::iterator I = entities.begin();
 	xrS_entities::iterator E = entities.end();
@@ -325,6 +340,107 @@ void xrServer::MakeUpdatePackets()
 	{
 		//all entities
 		CSE_Abstract& Test = *(I->second);
+		LPCSTR test_name = Test.name_replace();
+		if (!test_name || !test_name[0])
+			test_name = Test.name();
+		if (!test_name)
+			test_name = "<unknown>";
+
+		CSE_ALifeHumanStalker* stalker_entity =
+			singleplayer_local_diag ? smart_cast<CSE_ALifeHumanStalker*>(&Test) : nullptr;
+		const bool is_fanat_stalker =
+			stalker_entity && (nullptr != strstr(test_name, "fanat"));
+		if (stalker_entity)
+		{
+			CSE_ALifeObject* alife_object = smart_cast<CSE_ALifeObject*>(stalker_entity);
+			if (alife_object && alife_object->m_bOnline)
+			{
+				++sp_stalkers_online;
+				const Fvector current_pos = Test.o_Position;
+				xr_hash_map<u16, Fvector>::iterator prev_it = s_sp_stalker_last_positions.find(Test.ID);
+				if (prev_it != s_sp_stalker_last_positions.end())
+				{
+					const float moved = prev_it->second.distance_to(current_pos);
+					if (moved > 0.2f)
+					{
+						++sp_stalkers_moved;
+						if (emit_sp_diag_log && sp_stalker_samples.size() < 5)
+						{
+							LPCSTR entity_name = Test.name_replace();
+							if (!entity_name || !entity_name[0])
+								entity_name = Test.name();
+							if (!entity_name)
+								entity_name = "<unknown>";
+
+							sp_stalker_samples.push_back(make_string(
+								"id=%u name=[%s] moved=%.2f pos=(%.1f %.1f %.1f)",
+								Test.ID,
+								entity_name,
+								moved,
+								current_pos.x,
+								current_pos.y,
+								current_pos.z
+							).c_str());
+						}
+					}
+					prev_it->second = current_pos;
+				}
+				else
+				{
+					s_sp_stalker_last_positions.insert(mk_pair(Test.ID, current_pos));
+				}
+
+				if (emit_sp_diag_log && is_fanat_stalker && sp_fanat_samples.size() < 8)
+				{
+					const CALifeSimulator* sim = ai().get_alife();
+					int has_companion = -1;
+					int has_wait = -1;
+					int runtime_has_companion = -1;
+					int runtime_has_wait = -1;
+					if (sim)
+					{
+						KNOWN_INFO_VECTOR* known_info = sim->registry((CInfoPortionRegistry*)nullptr).object(Test.ID, true);
+						if (known_info)
+						{
+							has_companion =
+								(std::find_if(known_info->begin(), known_info->end(), CFindByIDPred("npcx_is_companion")) != known_info->end()) ? 1 : 0;
+							has_wait =
+								(std::find_if(known_info->begin(), known_info->end(), CFindByIDPred("npcx_beh_wait")) != known_info->end()) ? 1 : 0;
+						}
+						else
+						{
+							has_companion = 0;
+							has_wait = 0;
+						}
+					}
+
+					if (auto* runtime_obj = Level().Objects.net_Find(Test.ID))
+					{
+						if (CInventoryOwner* runtime_owner = smart_cast<CInventoryOwner*>(runtime_obj))
+						{
+							runtime_has_companion = runtime_owner->HasInfo("npcx_is_companion") ? 1 : 0;
+							runtime_has_wait = runtime_owner->HasInfo("npcx_beh_wait") ? 1 : 0;
+						}
+					}
+
+					sp_fanat_samples.push_back(make_string(
+						"pre id=%u name=[%s] owner=%u owner_ready=%d net_ready=%d pos=(%.1f %.1f %.1f) info(comp=%d wait=%d) runtime(comp=%d wait=%d)",
+						Test.ID,
+						test_name,
+						Test.owner ? Test.owner->ID.value() : 0u,
+						Test.owner ? (int)Test.owner->net_Ready : -1,
+						(int)Test.net_Ready,
+						current_pos.x,
+						current_pos.y,
+						current_pos.z,
+						has_companion,
+						has_wait,
+						runtime_has_companion,
+						runtime_has_wait
+					).c_str());
+				}
+			}
+		}
 
 		if (Test.s_flags.is(M_SPAWN_OBJECT_PHANTOM)) continue; // Surely: phantom
 		const bool world_sync_entity = dedicated_single_authoritative && ds_single_force_world_sync_entity(Test);
@@ -332,8 +448,14 @@ void xrServer::MakeUpdatePackets()
 			++world_sync_entities_seen;
 
 		const bool native_relevant = !!Test.Net_Relevant();
+		if (stalker_entity && native_relevant)
+			++sp_stalkers_native_relevant;
 		if (!native_relevant && !world_sync_entity)
+		{
+			if (emit_sp_diag_log && is_fanat_stalker && sp_fanat_samples.size() < 8)
+				sp_fanat_samples.push_back(make_string("skip id=%u reason=not_relevant world_sync=0", Test.ID).c_str());
 			continue;
+		}
 		if (!native_relevant && world_sync_entity)
 			++forced_world_sync_relevant;
 		++considered_relevant;
@@ -343,12 +465,16 @@ void xrServer::MakeUpdatePackets()
 		// In this mode we still need to emit UPDATE_Write packets to clients.
 		if (!dedicated_single_authoritative && (0 == Test.owner))
 		{
+			if (emit_sp_diag_log && is_fanat_stalker && sp_fanat_samples.size() < 8)
+				sp_fanat_samples.push_back(make_string("skip id=%u reason=no_owner", Test.ID).c_str());
 			++skipped_owner;
 			continue;
 		}
 
 		if (!dedicated_single_authoritative && !Test.net_Ready)
 		{
+			if (emit_sp_diag_log && is_fanat_stalker && sp_fanat_samples.size() < 8)
+				sp_fanat_samples.push_back(make_string("skip id=%u reason=not_ready", Test.ID).c_str());
 			++skipped_ready;
 			continue;
 		}
@@ -370,6 +496,10 @@ void xrServer::MakeUpdatePackets()
 			++written_updates;
 			if (0 == Test.owner)
 				++ownerless_written;
+			if (stalker_entity)
+				++sp_stalkers_written;
+			if (emit_sp_diag_log && is_fanat_stalker && sp_fanat_samples.size() < 8)
+				sp_fanat_samples.push_back(make_string("write id=%u native_rel=%u world_sync=%u chunk=%u", Test.ID, native_relevant ? 1 : 0, world_sync_entity ? 1 : 0, tmpPacket.B.count).c_str());
 		}
 	} //all entities
 
@@ -381,6 +511,35 @@ void xrServer::MakeUpdatePackets()
 			considered_relevant, written_updates, ownerless_written, skipped_owner, skipped_ready,
 			world_sync_entities_seen, forced_world_sync_relevant);
 		s_ds_single_update_log_time = Device.dwTimeGlobal + 5000;
+	}
+
+	if (emit_sp_diag_log)
+	{
+		Msg("* [SP_DIAG][SV_STALKER_UPD] online=%u native_relevant=%u written=%u moved_gt20cm=%u relevant_all=%u written_all=%u skipped_owner=%u skipped_not_ready=%u",
+			sp_stalkers_online,
+			sp_stalkers_native_relevant,
+			sp_stalkers_written,
+			sp_stalkers_moved,
+			considered_relevant,
+			written_updates,
+			skipped_owner,
+			skipped_ready);
+
+		for (xr_vector<xr_string>::const_iterator sample_it = sp_stalker_samples.begin();
+		     sample_it != sp_stalker_samples.end();
+		     ++sample_it)
+		{
+			Msg("* [SP_DIAG][SV_STALKER_MOVE] %s", sample_it->c_str());
+		}
+
+		for (xr_vector<xr_string>::const_iterator fanat_it = sp_fanat_samples.begin();
+		     fanat_it != sp_fanat_samples.end();
+		     ++fanat_it)
+		{
+			Msg("* [SP_DIAG][FANAT] %s", fanat_it->c_str());
+		}
+
+		s_sp_local_update_log_time = Device.dwTimeGlobal + 5000;
 	}
 }
 
@@ -581,40 +740,21 @@ u32 xrServer::OnMessage(NET_Packet& P, ClientID sender) // Non-Zero means broadc
 	switch (type)
 	{
 	case M_UPDATE:
-		{
-			// Dedicated-single safety:
-			// only the internal server bridge client is allowed to send M_UPDATE chunks.
-			// Remote player clients must use M_CL_UPDATE for actor state only.
-			if (g_dedicated_server && game && game->Type() == eGameIDSingle)
-			{
-				IClient* server_client = GetServerClient();
-				if (!server_client || (sender != server_client->ID))
-				{
-					Msg("! [NET_SAFE] Dropping unauthorized M_UPDATE from client 0x%08x in dedicated single mode",
-					    sender.value());
-					break;
-				}
-			}
-
-			Process_update(P, sender); // No broadcast
+	{
+		Process_update(P, sender); // No broadcast
 #ifdef DEBUG
-			VERIFY(verify_entities());
+		VERIFY(verify_entities());
 #endif
-		}
-		break;
+	}
+	break;
 	case M_SPAWN:
-		{
-			const bool dedicated_single = g_dedicated_server && game && game->Type() == eGameIDSingle;
-			const bool local_sender = CL && CL->flags.bLocal;
-			if (CL && (!dedicated_single || local_sender))
-				Process_spawn(P, sender);
-			else if (dedicated_single)
-				Msg("! [SV_SPAWN_NETSAFE] Dropping remote M_SPAWN from client 0x%08x in dedicated single mode",
-				    sender.value());
+	{
+		if (CL->flags.bLocal)
+			Process_spawn(P, sender);
 #ifdef DEBUG
-			VERIFY(verify_entities());
+		VERIFY(verify_entities());
 #endif
-		}
+	}
 		break;
 	case M_EVENT:
 		{
@@ -1006,38 +1146,36 @@ if( dbg_net_Draw_Flags.test( dbg_destroy ) )
 //--------------------------------------------------------------------
 void xrServer::Server_Client_Check(IClient* CL)
 {
-	// Логируем вход в функцию
-	Msg("* [Server_Client_Check] Start check for client: ID=%u, Connected=%d, ProcessID=%u",
-		CL->ID.value(), CL->flags.bConnected, CL->process_id);
-	if (SV_Client) {
-		if (SV_Client->ID == CL->ID)
+	if (SV_Client && SV_Client->ID == CL->ID)
+	{
+		if (!CL->flags.bConnected)
 		{
-			if (!CL->flags.bConnected)
-			{
-				Msg("* Client disconnected. Clearing SV_Client");
-				SV_Client = NULL;
-			}
-			return;
-		}
-		Msg("~ Another SV_Client exists (ID=%u). Ignoring this client", SV_Client->ID.value());
+			SV_Client = NULL;
+		};
 		return;
-	}
+	};
+
+	if (SV_Client && SV_Client->ID != CL->ID)
+	{
+		return;
+	};
+
 
 	if (!CL->flags.bConnected)
 	{
-		Msg("~ Client is not connected. Ignoring");
 		return;
-	}
+	};
 
-	Msg("* No SV_Client exists. This client will become new SV_Client");
-
-	CL->flags.bLocal = 0;
-	if (CL->process_id == GetCurrentProcessId()) {
+	if (CL->process_id == GetCurrentProcessId())
+	{
 		CL->flags.bLocal = 1;
 		SV_Client = (xrClientData*)CL;
+		Msg("New SV client 0x%08x", SV_Client->ID.value());
 	}
-
-	Msg("* Process check: Client PID=%u, Current PID=%u, IsLocal=%u", CL->ID.value(), CL->process_id, CL->flags.bLocal);
+	else
+	{
+		CL->flags.bLocal = 0;
+	}
 }
 
 CSE_Abstract* xrServer::GetEntity(u32 Num)

@@ -16,6 +16,7 @@
 #include "ai_space.h"
 #include "level_graph.h"
 #include "game_level_cross_table.h"
+#include "entity_alive.h"
 
 #include "UIGameSP.h"
 #include "../xrengine/xr_collide_form.h"
@@ -100,6 +101,15 @@ BOOL CLevelChanger::net_Spawn(CSE_Abstract* DC)
 		setEnabled(TRUE);
 	}
 	g_lchangers.push_back(this);
+	Msg("* [LC] net_spawn id=%hu section=%s enabled=%d silent=%d invite=%s next_graph=%u next_node=%u",
+		ID(),
+		cName().c_str(),
+		m_b_enabled ? 1 : 0,
+		m_bSilentMode ? 1 : 0,
+		m_invite_str.c_str(),
+		u32(m_game_vertex_id),
+		m_level_vertex_id);
+
 	return (bOk);
 }
 
@@ -121,9 +131,17 @@ void CLevelChanger::shedule_Update(u32 dt)
 void CLevelChanger::feel_touch_new(CObject* tpObject)
 {
 	CActor* l_tpActor = smart_cast<CActor*>(tpObject);
-	VERIFY(l_tpActor);
-	if (!l_tpActor->g_Alive())
-		return;
+	if (l_tpActor)
+	{
+		if (!l_tpActor->g_Alive())
+			return;
+	}
+	else
+	{
+		CEntityAlive* l_tpEntity = smart_cast<CEntityAlive*>(tpObject);
+		if (!l_tpEntity || (l_tpEntity != Level().CurrentEntity()) || !l_tpEntity->g_Alive())
+			return;
+	}
 
 	if (m_bSilentMode)
 	{
@@ -142,6 +160,12 @@ void CLevelChanger::feel_touch_new(CObject* tpObject)
 	if (pGameSP)
 		pGameSP->ChangeLevel(m_game_vertex_id, m_level_vertex_id, m_position, m_angles, p, r, b, m_invite_str,
 		                     m_b_enabled);
+	Msg("* [LC] touch_new id=%hu enabled=%d silent=%d actor=%d invite=%s",
+		ID(),
+		m_b_enabled ? 1 : 0,
+		m_bSilentMode ? 1 : 0,
+		l_tpActor ? 1 : 0,
+		m_invite_str.c_str());
 
 	m_entrance_time = Device.fTimeGlobal;
 }
@@ -175,9 +199,35 @@ bool CLevelChanger::get_reject_pos(Fvector& p, Fvector& r)
 
 bool CLevelChanger::feel_touch_contact(CObject* object)
 {
-	bool bRes = ((((CCF_Shape*)CFORM())->Contact(object)) != 0);
-	bRes = bRes && smart_cast<CActor*>(object) && smart_cast<CActor*>(object)->g_Alive();
-	return bRes;
+	if ((((CCF_Shape*)CFORM())->Contact(object)) == 0)
+		return false;
+
+	if (CActor* actor = smart_cast<CActor*>(object))
+	{
+		const bool result = actor->g_Alive();
+		Msg("* [LC] touch_contact id=%hu oid=%hu oname=%s actor=1 alive=%d result=%d",
+			ID(),
+			object->ID(),
+			object->cName().c_str(),
+			result ? 1 : 0,
+			result ? 1 : 0);
+		return result;
+	}
+
+	CEntityAlive* entity = smart_cast<CEntityAlive*>(object);
+	const bool is_current = entity && (entity == Level().CurrentEntity());
+	const bool result = is_current && entity->g_Alive();
+	if (entity)
+	{
+		Msg("* [LC] touch_contact id=%hu oid=%hu oname=%s actor=0 current=%d alive=%d result=%d",
+			ID(),
+			object->ID(),
+			object->cName().c_str(),
+			is_current ? 1 : 0,
+			entity->g_Alive() ? 1 : 0,
+			result ? 1 : 0);
+	}
+	return result;
 }
 
 void CLevelChanger::update_actor_invitation()
