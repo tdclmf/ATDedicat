@@ -21,6 +21,7 @@
 #include "../../level.h"
 #include "../../script_callback_ex.h"
 #include "../../game_object_space.h"
+#include "../../player_actor_context.h"
 #include "trader_animation.h"
 #include "../../../xrServerEntities/clsid_game.h"
 
@@ -95,8 +96,23 @@ void CAI_Trader::BoneCallback(CBoneInstance* B)
 
 void CAI_Trader::LookAtActor(CBoneInstance* B)
 {
+	Fvector target_position;
+	CObject* current_entity = Level().CurrentEntity();
+	if (current_entity)
+	{
+		target_position.set(current_entity->Position());
+	}
+	else
+	{
+		player_actor_context::SActorAnchor actor_anchor;
+		if (!player_actor_context::FindNearestRuntimePlayerAnchor(Position(), actor_anchor))
+			return;
+
+		target_position.set(actor_anchor.position);
+	}
+
 	Fvector dir;
-	dir.sub(Level().CurrentEntity()->Position(), Position());
+	dir.sub(target_position, Position());
 
 	float yaw, pitch;
 	dir.getHP(yaw, pitch);

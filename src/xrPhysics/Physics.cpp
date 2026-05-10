@@ -7,6 +7,10 @@
 //#include "gameobject.h"
 //#include "PhysicsShellHolder.h"
 #include "PHCollideValidator.h"
+#include "PHAICharacter.h"
+#include "IPhysicsShellHolder.h"
+#include "../xrCore/xrCore.h"
+#include "../xrEngine/device.h"
 #ifdef DEBUG
 #include "debug_output.h"
 #endif
@@ -21,6 +25,90 @@
 
 extern CPHWorld* ph_world;
 ///////////////////////////////////////////////////////////////////
+
+namespace
+{
+bool sp_trypos_diag_enabled()
+{
+	return Core.Params && strstr(Core.Params, "-sp_trypos_diag");
+}
+
+bool sp_ph_group_diag_allow()
+{
+	static u32 next_time = 0;
+	static u32 count = 0;
+	const u32 now = Device.dwTimeGlobal;
+	if (count < 64)
+	{
+		++count;
+		return true;
+	}
+
+	if (now < next_time)
+		return false;
+
+	next_time = now + 1000;
+	count = 0;
+	return true;
+}
+
+CPHAICharacter* sp_ai_character(CPHObject* object)
+{
+	if (!object || object->CastType() != CPHObject::tpCharacter)
+		return nullptr;
+
+	return static_cast<CPHCharacter*>(object)->CastAICharacter();
+}
+
+IPhysicsShellHolder* sp_ref_object(CPHObject* object)
+{
+	if (!object || object->CastType() != CPHObject::tpCharacter)
+		return nullptr;
+
+	return static_cast<CPHCharacter*>(object)->PhysicsRefObject();
+}
+
+void sp_ph_group_log(CPHObject* obj1, CPHObject* obj2, int contacts, int max_contacts, bool can_merge, bool merged)
+{
+	if (!sp_trypos_diag_enabled() || !sp_ph_group_diag_allow())
+		return;
+
+	CPHAICharacter* ai1 = sp_ai_character(obj1);
+	CPHAICharacter* ai2 = sp_ai_character(obj2);
+	if (!ai1 && !ai2)
+		return;
+
+	IPhysicsShellHolder* ref1 = sp_ref_object(obj1);
+	IPhysicsShellHolder* ref2 = sp_ref_object(obj2);
+	Fvector p1;
+	Fvector p2;
+	p1.set(0.f, 0.f, 0.f);
+	p2.set(0.f, 0.f, 0.f);
+	if (ref1)
+		p1.set(ref1->ObjectPosition());
+	if (ref2)
+		p2.set(ref2->ObjectPosition());
+
+	Msg("* [SP_PH_GROUP] a_id=%hu a_name=[%s] a_sect=[%s] a_type=%d a_active=%d a_grouped=%d b_id=%hu b_name=[%s] b_sect=[%s] b_type=%d b_active=%d b_grouped=%d contacts=%d max_contacts=%d can_merge=%d merged=%d dist=%.3f",
+		ref1 ? ref1->ObjectID() : u16(-1),
+		ref1 ? ref1->ObjectName() : "",
+		ref1 ? ref1->ObjectNameSect() : "",
+		obj1 ? int(obj1->CastType()) : -1,
+		obj1 && obj1->is_active() ? 1 : 0,
+		obj1 && obj1->Island().IsObjGroun() ? 1 : 0,
+		ref2 ? ref2->ObjectID() : u16(-1),
+		ref2 ? ref2->ObjectName() : "",
+		ref2 ? ref2->ObjectNameSect() : "",
+		obj2 ? int(obj2->CastType()) : -1,
+		obj2 && obj2->is_active() ? 1 : 0,
+		obj2 && obj2->Island().IsObjGroun() ? 1 : 0,
+		contacts,
+		max_contacts,
+		can_merge ? 1 : 0,
+		merged ? 1 : 0,
+		ref1 && ref2 ? p1.distance_to(p2) : -1.f);
+}
+}
 
 #include "ExtendedGeom.h"
 //union dInfBytes dInfinityValue = {{0,0,0x80,0x7f}};
@@ -285,11 +373,19 @@ void NearCallback(CPHObject* obj1, CPHObject* obj2, dGeomID o1, dGeomID o2)
 	CPHIsland* island2 = obj2->DActiveIsland();
 	obj2->near_callback(obj1);
 	int MAX_CONTACTS = -1;
-	if (!island1->CanMerge(island2, MAX_CONTACTS)) return;
-	if (CollideIntoGroup(o1, o2, ContactGroup, island1, MAX_CONTACTS) != 0)
+	const bool can_merge = island1->CanMerge(island2, MAX_CONTACTS);
+	if (!can_merge)
+	{
+		sp_ph_group_log(obj1, obj2, 0, MAX_CONTACTS, false, false);
+		return;
+	}
+
+	const int contacts = CollideIntoGroup(o1, o2, ContactGroup, island1, MAX_CONTACTS);
+	if (contacts != 0)
 	{
 		obj1->MergeIsland(obj2);
 		if (!obj2->is_active())obj2->EnableObject(obj1);
+		sp_ph_group_log(obj1, obj2, contacts, MAX_CONTACTS, true, true);
 	}
 }
 

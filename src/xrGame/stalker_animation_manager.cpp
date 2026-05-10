@@ -31,8 +31,10 @@ CStalkerAnimationManager::CStalkerAnimationManager(CAI_Stalker* object) :
 	m_torso(object),
 	m_legs(object),
 	m_script(object),
-	m_start_new_script_animation(false)
+	m_start_new_script_animation(false),
+	m_network_script_animation_active(false)
 {
+	m_network_script_animation.invalidate();
 }
 
 void CStalkerAnimationManager::reinit()
@@ -62,6 +64,8 @@ void CStalkerAnimationManager::reinit()
 	m_script.global_animation(true);
 
 	m_call_script_callback = false;
+	m_network_script_animation_active = false;
+	m_network_script_animation.invalidate();
 
 	m_previous_speed = 0.f;
 	m_target_speed = 0.f;
@@ -133,6 +137,9 @@ bool CStalkerAnimationManager::standing() const
 {
 	CAI_Stalker& obj = object();
 	stalker_movement_manager_smart_cover& movement = obj.movement();
+
+	if (obj.Remote() && (eMovementTypeStand != movement.movement_type()))
+		return (false);
 
 	if (movement.speed(obj.character_physics_support()->movement()) < EPS_L)
 		return (true);

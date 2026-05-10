@@ -21,6 +21,9 @@
 #include "console_vars.h"
 #include "../xrengine/device.h"
 #include "../xrengine/defines.h"
+#include "IPhysicsShellHolder.h"
+#include "PHCharacter.h"
+#include "../xrCore/xrCore.h"
 #include "../xrcdb/xr_area.h"
 #include "../xrcore/fs_internal.h"
 #ifdef	DEBUG
@@ -38,6 +41,56 @@
 ///////////////////////////////////////////////////////////
 //BOOL		g_bDebugDumpPhysicsStep				= 0;
 CPHWorld* ph_world = 0;
+namespace
+{
+bool sp_ph_world_diag_allow()
+{
+	if (!Core.Params || !strstr(Core.Params, "-sp_trypos_diag"))
+		return false;
+
+	static u32 next_time = 0;
+	static u32 count = 0;
+	const u32 now = Device.dwTimeGlobal;
+	if (count < 96)
+	{
+		++count;
+		return true;
+	}
+
+	if (now < next_time)
+		return false;
+
+	next_time = now + 1000;
+	count = 0;
+	return true;
+}
+
+void sp_ph_world_diag_log(CPHObject* obj, const Fvector& before_position, float step)
+{
+	if (!sp_ph_world_diag_allow() || !obj || obj->CastType() != CPHObject::tpCharacter)
+		return;
+
+	CPHCharacter* character = static_cast<CPHCharacter*>(obj);
+	IPhysicsShellHolder* ref_object = character->PhysicsRefObject();
+	if (!ref_object)
+		return;
+
+	Fvector after_position;
+	character->GetPosition(after_position);
+	const float moved = before_position.distance_to(after_position);
+	if (moved < 0.001f)
+		return;
+
+	Fvector velocity;
+	velocity.set(0.f, 0.f, 0.f);
+	character->GetVelocity(velocity);
+
+	Msg("* [SP_PH_WORLD] id=%hu name=[%s] sect=[%s] step=%.4f active=%d grouped=%d enabled=%d moved=%.4f pos_before=(%.3f %.3f %.3f) pos_after=(%.3f %.3f %.3f) vel=(%.3f %.3f %.3f)",
+	    ref_object->ObjectID(), ref_object->ObjectName(), ref_object->ObjectNameSect(),
+	    step, obj->is_active() ? 1 : 0, obj->Island().IsObjGroun() ? 1 : 0,
+	    character->IsEnabled() ? 1 : 0, moved, VPUSH(before_position), VPUSH(after_position), VPUSH(velocity));
+}
+}
 
 IPHWorld* __stdcall physics_world()
 {
@@ -420,9 +473,15 @@ void CPHWorld::Step()
 #ifdef	DEBUG
 		debug_output().DBG_ObjBeforeStep( obj );
 #endif
+		Fvector sp_ph_world_pos_before;
+		sp_ph_world_pos_before.set(0.f, 0.f, 0.f);
+		if (obj->CastType() == CPHObject::tpCharacter)
+			static_cast<CPHCharacter*>(obj)->GetPosition(sp_ph_world_pos_before);
 		TRY
 		obj->IslandStep(fixed_step);
 		CATCH
+		if (obj->CastType() == CPHObject::tpCharacter)
+			sp_ph_world_diag_log(obj, sp_ph_world_pos_before, fixed_step);
 #ifdef	DEBUG
 		debug_output().DBG_ObjAfterStep( obj );
 #endif

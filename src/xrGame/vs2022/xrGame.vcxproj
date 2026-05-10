@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Release-AVX|x64">
@@ -516,6 +516,7 @@
     <ClInclude Include="..\ai\Monsters\Cat\cat.h" />
     <ClInclude Include="..\ai\Monsters\Cat\cat_state_manager.h" />
     <ClInclude Include="..\ai\Monsters\Chimera\chimera.h" />
+    <ClInclude Include="alife_mp.h" />
     <CustomBuild Include="..\ai\monsters\chimera\chimera_attack_state.h" />
     <CustomBuild Include="..\ai\monsters\chimera\chimera_attack_state_inline.h" />
     <ClInclude Include="..\ai\Monsters\Chimera\chimera_state_hunting.h" />
@@ -1091,6 +1092,7 @@
     <ClInclude Include="..\game_sv_mp_team.h" />
     <ClInclude Include="..\game_sv_mp_vote_flags.h" />
     <ClInclude Include="..\game_sv_single.h" />
+    <ClInclude Include="..\player_actor_context.h" />
     <ClInclude Include="..\game_sv_teamdeathmatch.h" />
     <ClInclude Include="..\GlobalFeelTouch.hpp" />
     <CustomBuild Include="..\graph_abstract.h" />
@@ -2799,6 +2801,7 @@
     <ClCompile Include="..\game_sv_item_respawner.cpp" />
     <ClCompile Include="..\game_sv_mp.cpp" />
     <ClCompile Include="..\game_sv_single.cpp" />
+    <ClCompile Include="..\player_actor_context.cpp" />
     <ClCompile Include="..\game_sv_teamdeathmatch.cpp" />
     <ClCompile Include="..\game_sv_teamdeathmatch_process_event.cpp" />
     <ClCompile Include="..\GlobalFeelTouch.cpp" />
@@ -4206,6 +4209,7 @@
     <ClCompile Include="..\ZoneVisual.cpp" />
     <ClCompile Include="..\zone_effector.cpp" />
     <ClCompile Include="..\ZudaArtifact.cpp" />
+    <ClCompile Include="alife_mp.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="$(SolutionDir)3rd party\crypto\vs2022\crypto.vcxproj">

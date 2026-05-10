@@ -99,7 +99,21 @@ void CHitMemoryManager::add(float amount, const Fvector& vLocalDir, const CObjec
 		return;
 #endif // MASTER_GOLD
 
-	VERIFY(m_hits);
+	if (!m_hits)
+	{
+		static u32 next_log_time = 0;
+		if (Device.dwTimeGlobal >= next_log_time)
+		{
+			Msg("! [HIT_MEMORY] skipped hit for [%s][%u]: squad hit storage is not bound, who=[%s][%u]",
+				m_object ? m_object->cName().c_str() : "<null>",
+				m_object ? m_object->ID() : u16(-1),
+				who ? who->cName().c_str() : "<null>",
+				who ? who->ID() : u16(-1));
+			next_log_time = Device.dwTimeGlobal + 1000;
+		}
+		return;
+	}
+
 	if (!object().g_Alive())
 		return;
 
@@ -112,11 +126,27 @@ void CHitMemoryManager::add(float amount, const Fvector& vLocalDir, const CObjec
 		m_last_hit_time = Device.dwTimeGlobal;
 	}
 
+	const CGameObject* who_game_object = smart_cast<const CGameObject*>(who);
+	if (!who_game_object)
+	{
+		static u32 next_log_time = 0;
+		if (Device.dwTimeGlobal >= next_log_time)
+		{
+			Msg("! [HIT_MEMORY] skipped hit callback for [%s][%u]: invalid hit initiator [%s][%u]",
+				m_object ? m_object->cName().c_str() : "<null>",
+				m_object ? m_object->ID() : u16(-1),
+				who ? who->cName().c_str() : "<null>",
+				who ? who->ID() : u16(-1));
+			next_log_time = Device.dwTimeGlobal + 1000;
+		}
+		return;
+	}
+
 	object().callback(GameObject::eHit)(
 		m_object->lua_game_object(),
 		amount,
 		vLocalDir,
-		smart_cast<const CGameObject*>(who)->lua_game_object(),
+		who_game_object->lua_game_object(),
 		element
 	);
 

@@ -416,6 +416,34 @@ u32 CObjectList::net_Export(NET_Packet* _Packet, u32 start, u32 max_object_size)
 
 int g_Dump_Import_Obj = 0;
 
+namespace
+{
+static u32 g_object_update_chunk_end = u32(-1);
+static u16 g_object_update_chunk_id = u16(-1);
+}
+
+bool object_update_chunk_active()
+{
+	return g_object_update_chunk_end != u32(-1);
+}
+
+u32 object_update_chunk_remaining(NET_Packet& packet)
+{
+	if (!object_update_chunk_active())
+		return packet.r_elapsed();
+
+	const u32 tell = packet.r_tell();
+	if (tell >= g_object_update_chunk_end)
+		return 0;
+
+	return g_object_update_chunk_end - tell;
+}
+
+u16 object_update_chunk_id()
+{
+	return g_object_update_chunk_id;
+}
+
 void CObjectList::net_Import(NET_Packet* Packet)
 {
 	if (g_Dump_Import_Obj) Msg("---- net_import --- ");
@@ -426,16 +454,43 @@ void CObjectList::net_Import(NET_Packet* Packet)
 		Packet->r_u16(ID);
 		u8 size;
 		Packet->r_u8(size);
+		const u32 chunk_start = Packet->r_tell();
+		const u32 chunk_end = chunk_start + size;
+		if (size > Packet->r_elapsed())
+		{
+			Msg("! [CL_NET_UPD] malformed object update chunk id=%hu size=%u remaining=%u pos=%u",
+				ID, size, Packet->r_elapsed(), chunk_start);
+			Packet->r_advance(Packet->r_elapsed());
+			break;
+		}
+
 		CObject* P = net_Find(ID);
 		if (P)
 		{
-			u32 rsize = Packet->r_tell();
+			const u32 prev_chunk_end = g_object_update_chunk_end;
+			const u16 prev_chunk_id = g_object_update_chunk_id;
+			g_object_update_chunk_end = chunk_end;
+			g_object_update_chunk_id = ID;
 
 			P->net_Import(*Packet);
 
-			if (g_Dump_Import_Obj) Msg("* %s : %d - %d", *(P->cNameSect()), size, Packet->r_tell() - rsize);
+			if (Packet->r_tell() != chunk_end)
+			{
+				if (Packet->r_tell() > chunk_end)
+				{
+					Msg("! [CL_NET_UPD] object import overread id=%hu sect=[%s] size=%u read=%u",
+						ID, *(P->cNameSect()), size, Packet->r_tell() - chunk_start);
+				}
+
+				Packet->r_seek(chunk_end);
+			}
+
+			g_object_update_chunk_end = prev_chunk_end;
+			g_object_update_chunk_id = prev_chunk_id;
+
+			if (g_Dump_Import_Obj) Msg("* %s : %d", *(P->cNameSect()), size);
 		}
-		else Packet->r_advance(size);
+		else Packet->r_seek(chunk_end);
 	}
 
 	if (g_Dump_Import_Obj) Msg("------------------- ");

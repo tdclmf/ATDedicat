@@ -71,6 +71,8 @@ private:
 	bool m_call_script_callback;
 	bool m_call_global_callback;
 	bool m_start_new_script_animation;
+	bool m_network_script_animation_active;
+	MotionID m_network_script_animation;
 
 #ifdef USE_HEAD_BONE_PART_FAKE
 private:
@@ -211,6 +213,17 @@ public:
 	IC CStalkerAnimationPair& torso();
 	IC CStalkerAnimationPair& legs();
 	IC CStalkerAnimationPair& script();
+	void apply_network_animation_state(
+		const u32* motion,
+		const u16* time,
+		const u8* flags,
+		u32 track_count,
+		u32& time_applied,
+		u32& missing,
+		u32& mismatched,
+		u32& forced
+	);
+	void reset_network_animation_state();
 	IC CAI_Stalker& object() const;
 	IC const float& target_speed() const;
 	IC const bool& special_danger_move() const;

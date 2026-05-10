@@ -103,7 +103,7 @@ public:
 	virtual BOOL Ready() { return Props.net_Ready; }
 	BOOL GetTmpPreDestroy() const { return Props.bPreDestroy; }
 	void SetTmpPreDestroy(BOOL b) { Props.bPreDestroy = b; }
-	virtual float shedule_Scale() { return Device.vCameraPosition.distance_to(Position()) / 200.f; }
+	virtual float shedule_Scale();
 	virtual bool shedule_Needed() { return processing_enabled(); };
 
 	// Parentness
@@ -253,5 +253,8 @@ public:
 };
 
 #pragma pack(pop)
+
+ENGINE_API bool xr_server_nearest_actor_anchor(const Fvector& object_position, Fvector& actor_position,
+	float* actor_distance = nullptr, u16* actor_id = nullptr, LPCSTR* actor_name = nullptr);
 
 #endif //__XR_OBJECT_H__

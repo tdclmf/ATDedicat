@@ -38,6 +38,9 @@
 #include "stalker_movement_manager_smart_cover.h"
 
 #include "../build_config_defines.h"
+#include "../xrEngine/xr_object.h"
+
+extern ENGINE_API bool g_dedicated_server;
 
 //const float default_hinge_friction = 5.f;//gray_wolf comment
 #ifdef DEBUG
@@ -648,17 +651,22 @@ void CCharacterPhysicsSupport::in_UpdateCL()
 		//} 
 	else if (ik_controller())
 	{
-		CFrustum& view_frust = ::Render->ViewBase;
 		vis_data& vis = m_EntityAlife.Visual()->getVisData();
 		Fvector p;
 
 		m_EntityAlife.XFORM().transform_tiny(p, vis.sphere.P);
 
-		float dist = Device.vCameraPosition.distance_to(p);
+		Fvector actor_anchor;
+		float actor_anchor_dist = -1.f;
+		const bool use_server_actor_anchor =
+			g_dedicated_server &&
+			xr_server_nearest_actor_anchor(p, actor_anchor, &actor_anchor_dist);
+		float dist = use_server_actor_anchor ? actor_anchor_dist : Device.vCameraPosition.distance_to(p);
 
 		if (dist < IK_CALC_DIST)
 		{
-			if (view_frust.testSphere_dirty(p, vis.sphere.R) || dist < IK_ALWAYS_CALC_DIST)
+			const bool visible_for_ik = use_server_actor_anchor || (::Render && ::Render->ViewBase.testSphere_dirty(p, vis.sphere.R));
+			if (visible_for_ik || dist < IK_ALWAYS_CALC_DIST)
 			{
 				update_interactive_anims();
 				ik_controller()->Update();

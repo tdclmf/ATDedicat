@@ -167,6 +167,9 @@ float CPoltergeist::get_post_process_factor() const
 
 bool CPoltergeist::check_work_condition() const
 {
+	if (IIsServer())
+		return false;
+
 	return g_Alive() &&
 		Actor() &&
 		Actor()->g_Alive();
@@ -330,7 +333,7 @@ void CPoltergeist::UpdateCL()
 
 	ability()->update_frame();
 
-	if (Actor()->memory().visual().visible_now(this) &&
+	if (!IIsServer() && Actor() && Actor()->memory().visual().visible_now(this) &&
 		Actor()->Position().distance_to(Position()) < 85.f)
 	{
 		MakeMeCrow();

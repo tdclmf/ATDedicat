@@ -46,6 +46,7 @@ const int maxTeams = 32;
 class CFogOfWarMngr;
 class CBulletManager;
 class CMapManager;
+class CActor;
 
 namespace file_transfer
 {
@@ -202,6 +203,7 @@ protected:
 	void CalculateLevelCrc32();
 public:
 	const LevelMapSyncData& GetMapData() { return map_data; }
+	xr_vector<CActor*> m_mp_players;
 	// sounds
 	xr_vector<ref_sound*> static_Sounds;
 	// startup options
@@ -417,6 +419,11 @@ IC CPHCommander& CLevel::ph_commander_physics_worldstep()
 
 IC bool OnServer() { return Level().IsServer(); }
 IC bool OnClient() { return Level().IsClient(); }
+IC bool IIsServer() { return g_dedicated_server; }
+IC bool IIsClient()
+{
+	return g_pGameLevel && !g_dedicated_server && !Level().IsDemoPlay() && Level().IsClient() && !Level().IsServer();
+}
 IC bool IsGameTypeSingle() { return g_pGamePersistent->GameType() == u32(eGameIDSingle); }
 
 extern bool g_bDebugEvents;

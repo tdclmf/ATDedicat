@@ -33,6 +33,58 @@
 #include "cover_point.h"
 #include "level_graph.h"
 #include "cover_point.h"
+#include "level.h"
+#include "player_actor_context.h"
+
+extern ENGINE_API bool g_dedicated_server;
+extern int g_sp_diag_net_updates;
+
+static CActor* ai_actor_for_stalker(CAI_Stalker& object)
+{
+	if (!g_dedicated_server || !g_pGameLevel)
+		return Actor();
+
+	return player_actor_context::FindNearestRuntimePlayer(object.Position());
+}
+
+static bool sp_player_path_diag_allow()
+{
+	if (!g_sp_diag_net_updates)
+		return false;
+
+	static u32 next_log_time = 0;
+	static u32 burst_count = 0;
+
+	if (burst_count < 256)
+	{
+		++burst_count;
+		return true;
+	}
+
+	if (Device.dwTimeGlobal < next_log_time)
+		return false;
+
+	next_log_time = Device.dwTimeGlobal + 1000;
+	burst_count = 1;
+	return true;
+}
+
+static void sp_player_path_diag_log(CAI_Stalker& object, const CEntityAlive* enemy, const CActor* actor,
+	bool relation_enemy, bool visible, bool on_path)
+{
+	if (!sp_player_path_diag_allow())
+		return;
+
+	const float enemy_distance = enemy ? object.Position().distance_to(enemy->Position()) : -1.f;
+	const float actor_distance = actor ? object.Position().distance_to(actor->Position()) : -1.f;
+
+	Msg("* [SP_PLAYER_PATH] dedicated=%d id=%hu name=[%s] sect=[%s] enemy=%hu/%s/%.3f actor=%hu/%s/%.3f rel_enemy=%d visible=%d on_path=%d",
+		g_dedicated_server ? 1 : 0,
+		object.ID(), object.cName().c_str(), object.cNameSect().c_str(),
+		enemy ? enemy->ID() : u16(-1), enemy ? enemy->cName().c_str() : "none", enemy_distance,
+		actor ? actor->ID() : u16(-1), actor ? actor->cName().c_str() : "none", actor_distance,
+		relation_enemy ? 1 : 0, visible ? 1 : 0, on_path ? 1 : 0);
+}
 #include "level_graph.h"
 #include "stalker_animation_manager.h"
 #include "weapon.h"
@@ -408,15 +460,35 @@ _value_type CStalkerPropertyEvaluatorPlayerOnThePath::evaluate()
 {
 	const CEntityAlive* enemy = object().memory().enemy().selected();
 	if (!enemy)
+	{
+		sp_player_path_diag_log(object(), 0, 0, false, false, false);
 		return (false);
+	}
 
-	if (!object().is_relation_enemy(Actor()))
+	CActor* actor = ai_actor_for_stalker(object());
+	if (!actor)
+	{
+		sp_player_path_diag_log(object(), enemy, 0, false, false, false);
 		return (false);
+	}
 
-	if (!m_object->memory().visual().visible_now(Actor()))
+	const bool relation_enemy = object().is_relation_enemy(actor);
+	if (!relation_enemy)
+	{
+		sp_player_path_diag_log(object(), enemy, actor, relation_enemy, false, false);
 		return (false);
+	}
 
-	return (object().movement().is_object_on_the_way(Actor(), 2.f));
+	const bool visible = m_object->memory().visual().visible_now(actor);
+	if (!visible)
+	{
+		sp_player_path_diag_log(object(), enemy, actor, relation_enemy, visible, false);
+		return (false);
+	}
+
+	const bool on_path = object().movement().is_object_on_the_way(actor, 2.f);
+	sp_player_path_diag_log(object(), enemy, actor, relation_enemy, visible, on_path);
+	return (on_path);
 }
 
 //////////////////////////////////////////////////////////////////////////

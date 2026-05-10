@@ -23,7 +23,11 @@
 #include "alife_registry_wrappers.h"
 #include "infoportion.h"
 #include "InventoryOwner.h"
-#include <functional>
+#include "HudItem.h"
+#include "Weapon.h"
+#include "ai/stalker/ai_stalker.h"
+#include "stalker_movement_manager_smart_cover.h"
+#include "inventory.h"
 
 #pragma warning(push)
 #pragma warning(disable:4995)
@@ -31,9 +35,16 @@
 #pragma warning(pop)
 
 u32 g_sv_traffic_optimization_level = eto_none;
+extern int g_sp_diag_net_updates;
 
 namespace
 {
+	struct SStalkerRuntimeMotionSample
+	{
+		Fvector position;
+		u32 time;
+	};
+
 	IC bool ds_single_force_world_sync_entity(CSE_Abstract& entity)
 	{
 		CSE_ALifeObject* alife_object = entity.cast_alife_object();
@@ -308,7 +319,9 @@ void xrServer::MakeUpdatePackets()
 	u32 position;
 	static u32 s_ds_single_update_log_time = 0;
 	static u32 s_sp_local_update_log_time = 0;
+	static u32 s_sp_net_write_log_time = 0;
 	static xr_hash_map<u16, Fvector> s_sp_stalker_last_positions;
+	static xr_hash_map<u16, SStalkerRuntimeMotionSample> s_sp_stalker_runtime_motion;
 
 	m_updator.begin_updates();
 	const bool dedicated_single_authoritative =
@@ -319,6 +332,10 @@ void xrServer::MakeUpdatePackets()
 		game &&
 		(game->Type() == eGameIDSingle);
 	const bool emit_sp_diag_log = singleplayer_local_diag && (Device.dwTimeGlobal >= s_sp_local_update_log_time);
+	const bool emit_sp_net_trace =
+		(g_sp_diag_net_updates != 0) &&
+		game &&
+		(Device.dwTimeGlobal >= s_sp_net_write_log_time);
 
 	u32 considered_relevant = 0;
 	u32 skipped_owner = 0;
@@ -333,6 +350,7 @@ void xrServer::MakeUpdatePackets()
 	u32 sp_stalkers_moved = 0;
 	xr_vector<xr_string> sp_stalker_samples;
 	xr_vector<xr_string> sp_fanat_samples;
+	xr_vector<xr_string> sp_net_write_samples;
 
 	xrS_entities::iterator I = entities.begin();
 	xrS_entities::iterator E = entities.end();
@@ -346,8 +364,11 @@ void xrServer::MakeUpdatePackets()
 		if (!test_name)
 			test_name = "<unknown>";
 
+		if (dedicated_single_authoritative && (Test.ID == 0))
+			continue;
+
 		CSE_ALifeHumanStalker* stalker_entity =
-			singleplayer_local_diag ? smart_cast<CSE_ALifeHumanStalker*>(&Test) : nullptr;
+			(dedicated_single_authoritative || singleplayer_local_diag || emit_sp_net_trace) ? smart_cast<CSE_ALifeHumanStalker*>(&Test) : nullptr;
 		const bool is_fanat_stalker =
 			stalker_entity && (nullptr != strstr(test_name, "fanat"));
 		if (stalker_entity)
@@ -484,9 +505,169 @@ void xrServer::MakeUpdatePackets()
 		{
 			tmpPacket.w_u16(Test.ID);
 			tmpPacket.w_chunk_open8(position);
-			Test.UPDATE_Write(tmpPacket);
+
+			int runtime_move = -1;
+			int runtime_body = -1;
+			int runtime_mental = -1;
+			float runtime_speed = -1.f;
+			float runtime_actual_speed = -1.f;
+			u16 runtime_active_slot = u16(-1);
+			u16 runtime_active_item_id = u16(-1);
+			u8 runtime_hud_state = u8(-1);
+			u8 runtime_hud_next_state = u8(-1);
+			u8 runtime_weapon_state = u8(-1);
+			u8 runtime_weapon_next_state = u8(-1);
+			u16 runtime_weapon_ammo_elapsed = 0;
+			u8 runtime_weapon_ammo_type = u8(-1);
+			u8 runtime_weapon_zoomed = 0;
+			u8 runtime_weapon_working = 0;
+
+			bool wrote_stalker_runtime_export = false;
+
+			if (dedicated_single_authoritative && stalker_entity)
+			{
+				CObject* runtime_obj = Level().Objects.net_Find(Test.ID);
+				CAI_Stalker* runtime_stalker = smart_cast<CAI_Stalker*>(runtime_obj);
+				if (runtime_stalker && runtime_stalker->getReady())
+				{
+					runtime_move = (int)runtime_stalker->movement().movement_type();
+					runtime_body = (int)runtime_stalker->movement().body_state();
+					runtime_mental = (int)runtime_stalker->movement().mental_state();
+					runtime_speed = runtime_stalker->movement().speed();
+
+					const Fvector runtime_pos = runtime_stalker->Position();
+					runtime_actual_speed = runtime_speed;
+					xr_hash_map<u16, SStalkerRuntimeMotionSample>::iterator motion_it = s_sp_stalker_runtime_motion.find(Test.ID);
+					if (motion_it != s_sp_stalker_runtime_motion.end())
+					{
+						const u32 dt = Device.dwTimeGlobal - motion_it->second.time;
+						const float dist = motion_it->second.position.distance_to(runtime_pos);
+						if (dt && (dt < 5000) && (dist < 30.f))
+							runtime_actual_speed = dist / (float(dt) / 1000.f);
+						motion_it->second.position = runtime_pos;
+						motion_it->second.time = Device.dwTimeGlobal;
+					}
+					else
+					{
+						SStalkerRuntimeMotionSample sample;
+						sample.position = runtime_pos;
+						sample.time = Device.dwTimeGlobal;
+						s_sp_stalker_runtime_motion.insert(mk_pair(Test.ID, sample));
+					}
+
+					if (runtime_speed <= 0.03f)
+						runtime_actual_speed = 0.f;
+
+					runtime_active_slot = runtime_stalker->inventory().GetActiveSlot();
+					CInventoryItem* active_item = runtime_stalker->inventory().ActiveItem();
+					if (active_item)
+					{
+						runtime_active_item_id = active_item->object().ID();
+
+						CHudItem* hud_item = active_item->cast_hud_item();
+						if (hud_item)
+						{
+							runtime_hud_state = (u8)hud_item->GetState();
+							runtime_hud_next_state = (u8)hud_item->GetNextState();
+						}
+
+						CWeapon* weapon = active_item->cast_weapon();
+						if (weapon)
+						{
+							runtime_weapon_state = (u8)weapon->GetState();
+							runtime_weapon_next_state = (u8)weapon->GetNextState();
+							runtime_weapon_ammo_elapsed = (u16)clampr(weapon->GetAmmoElapsed(), 0, 65534);
+							runtime_weapon_ammo_type = weapon->GetAmmoType();
+							runtime_weapon_zoomed = weapon->IsZoomed() ? 1 : 0;
+							runtime_weapon_working = weapon->IsWorking() ? 1 : 0;
+						}
+					}
+
+					if (runtime_stalker->Local())
+					{
+						const u32 before_export = tmpPacket.w_tell();
+						runtime_stalker->net_Export(tmpPacket);
+						wrote_stalker_runtime_export = tmpPacket.w_tell() > before_export;
+						if (!wrote_stalker_runtime_export)
+							tmpPacket.B.count = before_export;
+					}
+				}
+			}
+
+			if (!wrote_stalker_runtime_export)
+				Test.UPDATE_Write(tmpPacket);
 			u32 ObjectSize = u32(tmpPacket.w_tell() - position) - sizeof(u8);
 			tmpPacket.w_chunk_close8(position);
+
+			if (emit_sp_net_trace && (0 == Test.ID) && sp_net_write_samples.size() < 16)
+			{
+				CObject* runtime_obj = Level().Objects.net_Find(Test.ID);
+				Fvector runtime_pos;
+				runtime_pos.set(0.f, 0.f, 0.f);
+				if (runtime_obj)
+					runtime_pos = runtime_obj->Position();
+				sp_net_write_samples.push_back(make_string(
+					"ZERO_ID name=[%s] owner=%u ready=%d native_rel=%u world_sync=%u chunk=%u packet=%u cse_pos=(%.2f %.2f %.2f) runtime=%d runtime_local=%d runtime_ready=%d runtime_pos=(%.2f %.2f %.2f)",
+					test_name,
+					Test.owner ? Test.owner->ID.value() : 0u,
+					(int)Test.net_Ready,
+					native_relevant ? 1 : 0,
+					world_sync_entity ? 1 : 0,
+					ObjectSize,
+					tmpPacket.B.count,
+					Test.o_Position.x, Test.o_Position.y, Test.o_Position.z,
+					runtime_obj ? 1 : 0,
+					runtime_obj ? (runtime_obj->Local() ? 1 : 0) : -1,
+					runtime_obj ? (runtime_obj->getReady() ? 1 : 0) : -1,
+					runtime_pos.x, runtime_pos.y, runtime_pos.z
+				).c_str());
+			}
+
+			if (emit_sp_net_trace && stalker_entity && sp_net_write_samples.size() < 16)
+			{
+				CObject* runtime_obj = Level().Objects.net_Find(Test.ID);
+				Fvector runtime_pos;
+				runtime_pos.set(0.f, 0.f, 0.f);
+				if (runtime_obj)
+					runtime_pos = runtime_obj->Position();
+				sp_net_write_samples.push_back(make_string(
+					"id=%u name=[%s] owner=%u ready=%d native_rel=%u world_sync=%u online=%d chunk=%u packet=%u packet_src=%s state=%d/%d/%d state_speed=%.3f actual_speed=%.3f stuck=%d slot=%u item=%u hud=%u/%u wpn=%u/%u ammo=%u type=%u zoom=%u fire=%u cse_pos=(%.2f %.2f %.2f) cse_health=%.3f cse_ts=%u cse_yaw=%.3f runtime=%d runtime_local=%d runtime_ready=%d runtime_pos=(%.2f %.2f %.2f)",
+					Test.ID,
+					test_name,
+					Test.owner ? Test.owner->ID.value() : 0u,
+					(int)Test.net_Ready,
+					native_relevant ? 1 : 0,
+					world_sync_entity ? 1 : 0,
+					stalker_entity->m_bOnline ? 1 : 0,
+					ObjectSize,
+					tmpPacket.B.count,
+					wrote_stalker_runtime_export ? "runtime_export" : "cse_update",
+					runtime_move,
+					runtime_body,
+					runtime_mental,
+					runtime_speed,
+					runtime_actual_speed,
+					((runtime_speed > 0.05f) && (runtime_actual_speed >= 0.f) && (runtime_actual_speed < 0.03f)) ? 1 : 0,
+					runtime_active_slot,
+					runtime_active_item_id,
+					runtime_hud_state,
+					runtime_hud_next_state,
+					runtime_weapon_state,
+					runtime_weapon_next_state,
+					runtime_weapon_ammo_elapsed,
+					runtime_weapon_ammo_type,
+					runtime_weapon_zoomed,
+					runtime_weapon_working,
+					Test.o_Position.x, Test.o_Position.y, Test.o_Position.z,
+					stalker_entity->get_health(),
+					stalker_entity->timestamp,
+					stalker_entity->o_model,
+					runtime_obj ? 1 : 0,
+					runtime_obj ? (runtime_obj->Local() ? 1 : 0) : -1,
+					runtime_obj ? (runtime_obj->getReady() ? 1 : 0) : -1,
+					runtime_pos.x, runtime_pos.y, runtime_pos.z
+				).c_str());
+			}
 
 			if (ObjectSize == 0) continue;
 #ifdef DEBUG
@@ -540,6 +721,21 @@ void xrServer::MakeUpdatePackets()
 		}
 
 		s_sp_local_update_log_time = Device.dwTimeGlobal + 5000;
+	}
+
+	if (emit_sp_net_trace)
+	{
+		Msg("* [SP_NET][SV_SUMMARY] relevant=%u written=%u stalkers_online=%u stalkers_written=%u stalkers_moved=%u ownerless_written=%u samples=%u",
+			considered_relevant,
+			written_updates,
+			sp_stalkers_online,
+			sp_stalkers_written,
+			sp_stalkers_moved,
+			ownerless_written,
+			(u32)sp_net_write_samples.size());
+		for (xr_vector<xr_string>::const_iterator it = sp_net_write_samples.begin(); it != sp_net_write_samples.end(); ++it)
+			Msg("* [SP_NET][SV_WRITE] %s", it->c_str());
+		s_sp_net_write_log_time = Device.dwTimeGlobal + 1000;
 	}
 }
 

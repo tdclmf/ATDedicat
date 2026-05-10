@@ -19,10 +19,22 @@
 #include "doors_actor.h"
 #include "doors_manager.h"
 #include "level_path_builder.h"
+#include "level.h"
+#include "gametype_chooser.h"
 
 #ifndef MASTER_GOLD
 #	include "ai_debug.h"
 #endif // MASTER_GOLD
+
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+	IC bool sp_obstacles_dedicated_single()
+	{
+		return g_dedicated_server && (GameID() == eGameIDSingle);
+	}
+}
 
 static const u32 fail_check_time = 1000;
 
@@ -163,6 +175,10 @@ void stalker_movement_manager_obstacles::move_along_path_impl(CPHMovementControl
 	if (
 #ifndef MASTER_GOLD
 		(!psAI_Flags.test(aiObstaclesAvoidingStatic) &&
+			m_dynamic_obstacles.need_path_to_rebuild()
+		) ||
+#else
+		(sp_obstacles_dedicated_single() &&
 			m_dynamic_obstacles.need_path_to_rebuild()
 		) ||
 #endif // MASTER_GOLD

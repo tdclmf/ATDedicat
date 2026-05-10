@@ -16,6 +16,29 @@
 #include "alife_graph_registry.h"
 #include "game_level_cross_table.h"
 #include "level_graph.h"
+#include "player_actor_context.h"
+
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+bool alife_group_actor_position(const Fvector& object_position, Fvector& actor_position)
+{
+	player_actor_context::SActorAnchor anchor;
+	if (player_actor_context::FindNearestRuntimePlayerAnchor(object_position, anchor))
+	{
+		actor_position = anchor.position;
+		return true;
+	}
+
+	CSE_ALifeCreatureActor* graph_actor = ai().alife().graph().actor();
+	if (!graph_actor || (g_dedicated_server && (graph_actor->ID == 0)))
+		return false;
+
+	actor_position = graph_actor->o_Position;
+	return true;
+}
+}
 
 void CSE_ALifeGroupAbstract::switch_online()
 {
@@ -161,9 +184,11 @@ void CSE_ALifeGroupAbstract::try_switch_offline()
 				// to switch offline
 				break;
 
-			if (I->alife().graph().actor()->o_Position.distance_to(tpGroupMember->o_Position) <= I
-			                                                                                     ->alife().
-			                                                                                     offline_distance())
+			Fvector actor_position;
+			if (!alife_group_actor_position(tpGroupMember->o_Position, actor_position))
+				continue;
+
+			if (actor_position.distance_to(tpGroupMember->o_Position) <= I->alife().offline_distance())
 				// so, it is not ready, breaking a cycle, because we can't 
 				// switch group offline since not all the group members are ready
 				// to switch offline

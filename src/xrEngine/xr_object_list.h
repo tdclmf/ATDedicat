@@ -5,6 +5,10 @@
 class ENGINE_API CObject;
 class NET_Packet;
 
+ENGINE_API bool object_update_chunk_active();
+ENGINE_API u32 object_update_chunk_remaining(NET_Packet& packet);
+ENGINE_API u16 object_update_chunk_id();
+
 class ENGINE_API CObjectList
 {
 private:

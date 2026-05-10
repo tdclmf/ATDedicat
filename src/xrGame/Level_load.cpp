@@ -22,6 +22,25 @@
 
 extern ENGINE_API bool g_dedicated_server;
 
+static bool run_remote_client_start_game_callback(LPCSTR phase)
+{
+	if (!IIsClient())
+		return false;
+
+	ai().script_engine().process_file_if_exists("mp_single_bridge_patches", false);
+
+	luabind::functor<bool> init;
+	if (!ai().script_engine().functor("mp_single_bridge_patches.init", init, false))
+	{
+		Msg("! [MP_BRIDGE] early callback skipped at [%s]: mp_single_bridge_patches.init not found", phase);
+		return false;
+	}
+
+	const bool initialized = init();
+	Msg("* [MP_BRIDGE] early callback at [%s] result=%d", phase, initialized ? 1 : 0);
+	return initialized;
+}
+
 bool CLevel::net_proxy_bootstrap_game_graph()
 {
 	if (g_dedicated_server || !OnClient() || OnServer() || ai().get_alife())
@@ -118,6 +137,8 @@ bool CLevel::Load_GameSpecific_Before()
 
 	if (client_proxy_world)
 	{
+		run_remote_client_start_game_callback("Load_GameSpecific_Before");
+
 		if (net_proxy_bootstrap_game_graph())
 		{
 			Msg("* [NET_PROXY][AI] Proxy client runtime: game_graph bootstrap ready.");

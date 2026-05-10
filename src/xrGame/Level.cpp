@@ -56,6 +56,7 @@
 #include "debug_renderer.h"
 #include "LevelDebugScript.h"
 #include "weapon_trace.h"
+#include "player_actor_context.h"
 
 #ifdef DEBUG
 #include "level_debug.h"
@@ -627,7 +628,10 @@ void CLevel::OnFrame()
 #endif
 	Fvector temp_vector;
 	m_feel_deny.feel_touch_update(temp_vector, 0.f);
-	psDeviceFlags.set(rsDisableObjectsAsCrows, true);
+	if (GameID() != eGameIDSingle)
+		psDeviceFlags.set(rsDisableObjectsAsCrows, true);
+	else
+		psDeviceFlags.set(rsDisableObjectsAsCrows, false);
 
 	// Client receive
 	if (net_isDisconnected())
@@ -646,6 +650,45 @@ void CLevel::OnFrame()
 		ClientReceive();
 		Device.Statistic->netClient1.End();
 	}
+
+	if (g_dedicated_server && GameID() == eGameIDSingle)
+	{
+		player_actor_context::SActorAnchor actor_anchor;
+		if (player_actor_context::FindNearestRuntimePlayerAnchor(Device.vCameraPosition, actor_anchor))
+		{
+			CActor* const current_actor = smart_cast<CActor*>(CurrentEntity());
+			if (actor_anchor.actor && current_actor != actor_anchor.actor)
+			{
+				SetControlEntity(actor_anchor.actor);
+				SetEntity(actor_anchor.actor);
+				Msg("* [SP_ENTITY_ANCHOR] actor=%hu name=[%s] reason=runtime_mp_actor_current_entity",
+					actor_anchor.id, actor_anchor.name ? actor_anchor.name : "");
+			}
+
+			const Fvector old_camera_position = Device.vCameraPosition;
+			Device.vCameraPosition.set(actor_anchor.position);
+			if (actor_anchor.actor)
+				Device.vCameraDirection.set(actor_anchor.actor->XFORM().k).normalize_safe();
+
+			static u32 s_sp_camera_anchor_next = 0;
+			static u32 s_sp_camera_anchor_count = 0;
+			const u32 now = Device.dwTimeGlobal;
+			if (s_sp_camera_anchor_count < 16 || now >= s_sp_camera_anchor_next)
+			{
+				if (now >= s_sp_camera_anchor_next)
+				{
+					s_sp_camera_anchor_next = now + 1000;
+					s_sp_camera_anchor_count = 0;
+				}
+
+				++s_sp_camera_anchor_count;
+				Msg("* [SP_CAMERA_ANCHOR] actor=%hu name=[%s] old=(%.2f %.2f %.2f) new=(%.2f %.2f %.2f) dir=(%.3f %.3f %.3f)",
+				    actor_anchor.id, actor_anchor.name ? actor_anchor.name : "",
+				    VPUSH(old_camera_position), VPUSH(Device.vCameraPosition), VPUSH(Device.vCameraDirection));
+			}
+		}
+	}
+
 	ProcessGameEvents();
 	if (m_bNeed_CrPr)
 		make_NetCorrectionPrediction();
@@ -765,7 +808,7 @@ void CLevel::UI_AND_PHCommanders()
 		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
 	if (m_ph_commander)
 		m_ph_commander->update();
-	if (!g_dedicated_server && m_ph_commander_scripts)
+	if (m_ph_commander_scripts)
 		m_ph_commander_scripts->update();
 }
 

@@ -681,6 +681,21 @@ void stalker_movement_manager_base::setup_speed_from_animation(const float& spee
 	set_desirable_speed(object().m_fCurSpeed = speed);
 }
 
+void stalker_movement_manager_base::setup_state_from_network(EBodyState body_state, EMovementType movement_type, EMentalState mental_state, const float& speed)
+{
+	m_current.m_body_state = body_state;
+	m_current.m_movement_type = movement_type;
+	m_current.m_mental_state = mental_state;
+
+	m_target.m_body_state = body_state;
+	m_target.m_movement_type = movement_type;
+	m_target.m_mental_state = mental_state;
+
+	m_speed = speed;
+	setup_speed_from_animation(speed);
+	setup_head_speed(m_current);
+}
+
 void stalker_movement_manager_base::on_build_path()
 {
 	m_last_query_object = 0;

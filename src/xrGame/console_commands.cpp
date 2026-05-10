@@ -77,6 +77,7 @@ extern void release_smart_cast_stats();
 
 extern u64 g_qwStartGameTime;
 extern u64 g_qwEStartGameTime;
+extern int g_sp_diag_net_updates;
 
 ENGINE_API
 extern float psHUD_FOV_def;
@@ -2779,6 +2780,7 @@ void CCC_RegisterCommands()
 	CMD3(CCC_Mask, "g_3d_pda", &psActorFlags, AF_3D_PDA);
 	CMD3(CCC_Mask, "g_simple_pda", &psActorFlags, AF_SIMPLE_PDA);
 	CMD1(CCC_GameDifficulty, "g_game_difficulty");
+	CMD4(CCC_Integer, "sp_diag_net_updates", &g_sp_diag_net_updates, 0, 1);
 
 	CMD3(CCC_Mask, "g_backrun", &psActorFlags, AF_RUN_BACKWARD);
 	CMD4(CCC_Integer, "ik_available", &ik_available, FALSE, TRUE);

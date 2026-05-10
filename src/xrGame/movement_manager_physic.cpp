@@ -12,6 +12,10 @@
 #include "detail_path_manager.h"
 #include "level.h"
 #include "custommonster.h"
+#include "actor.h"
+#include "physicsshellholder.h"
+#include "../xrphysics/physicsshell.h"
+#include "../xrEngine/xr_object_list.h"
 #include "../xrphysics/IColisiondamageInfo.h"
 
 #include "profiler.h"
@@ -19,6 +23,210 @@
 // Lain: added 
 #include "steering_behaviour.h"
 
+extern int g_sp_diag_net_updates;
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+constexpr LPCSTR kSpMphysSource = "src_20260507_sp_compare_no_preavoid";
+
+bool sp_mphys_diag_allow(u32& next_time, u32& count, u32 interval_ms, u32 max_count)
+{
+	if (!g_sp_diag_net_updates)
+		return false;
+
+	if (count < max_count)
+	{
+		++count;
+		return true;
+	}
+
+	const u32 now = Device.dwTimeGlobal;
+	if (now < next_time)
+		return false;
+
+	next_time = now + interval_ms;
+	count = 0;
+	return true;
+}
+
+bool sp_mphys_has_param(LPCSTR param)
+{
+    return param && param[0] && Core.Params && strstr(Core.Params, param);
+}
+
+struct SSpMphysActorDiag
+{
+    u16 global_id;
+    LPCSTR global_name;
+    float global_dist;
+    int global_alive;
+    u16 nearest_id;
+    LPCSTR nearest_name;
+    float nearest_dist;
+    u32 runtime_count;
+};
+
+void sp_mphys_fill_actor_diag(const CCustomMonster& object, SSpMphysActorDiag& diag)
+{
+    diag.global_id = u16(-1);
+    diag.global_name = "";
+    diag.global_dist = -1.f;
+    diag.global_alive = 0;
+    diag.nearest_id = u16(-1);
+    diag.nearest_name = "";
+    diag.nearest_dist = flt_max;
+    diag.runtime_count = 0;
+
+    CActor* global_actor = Actor();
+    if (global_actor)
+    {
+        diag.global_id = global_actor->ID();
+        diag.global_name = global_actor->cName().c_str();
+        diag.global_dist = object.Position().distance_to(global_actor->Position());
+        diag.global_alive = global_actor->g_Alive() ? 1 : 0;
+    }
+
+    const u32 object_count = Level().Objects.o_count();
+    for (u32 i = 0; i < object_count; ++i)
+    {
+        CObject* level_object = Level().Objects.o_get_by_iterator(i);
+        if (!level_object)
+            continue;
+
+        CActor* actor = smart_cast<CActor*>(level_object);
+        if (!actor || (actor->ID() == 0) || !actor->g_Alive())
+            continue;
+
+        ++diag.runtime_count;
+        const float distance = object.Position().distance_to(actor->Position());
+        if (distance >= diag.nearest_dist)
+            continue;
+
+        diag.nearest_dist = distance;
+        diag.nearest_id = actor->ID();
+        diag.nearest_name = actor->cName().c_str();
+    }
+
+    if (diag.nearest_dist == flt_max)
+        diag.nearest_dist = -1.f;
+}
+
+void sp_mphys_diag_log(
+	LPCSTR branch,
+	const CCustomMonster& object,
+	CPHMovementControl* movement_control,
+	const Fvector& start_position,
+	const Fvector& requested_position,
+	const Fvector& result_position,
+	float desirable_speed,
+	float real_speed,
+	float time_delta,
+	u32 nearest_count,
+	const CObject* nearest_object,
+	u32 travel_point,
+	float dist,
+	float dist_to_target)
+{
+	static u32 s_sp_mphys_next = 0;
+	static u32 s_sp_mphys_count = 0;
+
+	if (!sp_mphys_diag_allow(s_sp_mphys_next, s_sp_mphys_count, 1000, 512))
+		return;
+
+	if ((desirable_speed <= 0.05f) && (nearest_count == 0))
+		return;
+
+	Fvector control_position = result_position;
+	Fvector character_position = result_position;
+	Fvector velocity = {0.f, 0.f, 0.f};
+	float actual_velocity = -1.f;
+	int character_enabled = -1;
+	if (movement_control)
+	{
+		movement_control->GetPosition(control_position);
+		movement_control->GetCharacterPosition(character_position);
+		velocity = movement_control->GetVelocity();
+		actual_velocity = movement_control->GetVelocityActual();
+		character_enabled = movement_control->IsCharacterEnabled() ? 1 : 0;
+	}
+
+    SSpMphysActorDiag actor_diag;
+    sp_mphys_fill_actor_diag(object, actor_diag);
+    const float camera_distance = Device.vCameraPosition.distance_to(object.Position());
+    const int physics_only = movement_control && movement_control->PhysicsOnlyMode() ? 1 : 0;
+
+    Msg("* [SP_MPHYS] src=%s dedicated=%d server=%d id=%hu name=[%s] branch=%s enabled=%d physics_only=%d nearest=%u nearest0=%hu/%s withactor=%d actorproxy=%d cam_dist=%.3f global_actor=%hu/%s/%.3f/%d runtime_actors=%u nearest_actor=%hu/%s/%.3f dt=%.4f start=(%.2f %.2f %.2f) req=(%.2f %.2f %.2f) result=(%.2f %.2f %.2f) ctrl=(%.2f %.2f %.2f) char=(%.2f %.2f %.2f) req_step=%.4f res_step=%.4f desired=%.3f real=%.3f actual=%.3f vel=(%.3f %.3f %.3f) tp=%u dist=%.3f dist_target=%.3f",
+        kSpMphysSource,
+        g_dedicated_server ? 1 : 0, IIsServer() ? 1 : 0,
+        object.ID(), object.cName().c_str(), branch, character_enabled, physics_only,
+        nearest_count, nearest_object ? nearest_object->ID() : u16(-1), nearest_object ? nearest_object->cName().c_str() : "",
+        sp_mphys_has_param("-withactor") ? 1 : 0, 0, camera_distance,
+        actor_diag.global_id, actor_diag.global_name, actor_diag.global_dist, actor_diag.global_alive,
+        actor_diag.runtime_count, actor_diag.nearest_id, actor_diag.nearest_name, actor_diag.nearest_dist,
+        time_delta, VPUSH(start_position), VPUSH(requested_position), VPUSH(result_position), VPUSH(control_position), VPUSH(character_position),
+        start_position.distance_to(requested_position), start_position.distance_to(result_position),
+        desirable_speed, real_speed, actual_velocity, VPUSH(velocity), travel_point, dist, dist_to_target);
+}
+void sp_mphys_diag_log_blockers(
+	const CCustomMonster& object,
+	const xr_vector<CObject*>& nearest_objects,
+	const Fvector& start_position,
+	const Fvector& requested_position,
+	const Fvector& result_position)
+{
+	static u32 s_sp_mphys_block_next = 0;
+	static u32 s_sp_mphys_block_count = 0;
+
+	if (!sp_mphys_diag_allow(s_sp_mphys_block_next, s_sp_mphys_block_count, 1000, 256))
+		return;
+
+	Msg("* [SP_MPHYS_BLOCK] src=%s dedicated=%d server=%d id=%hu name=[%s] blockers=%u req_step=%.4f res_step=%.4f start=(%.2f %.2f %.2f) req=(%.2f %.2f %.2f) result=(%.2f %.2f %.2f)",
+		kSpMphysSource,
+		g_dedicated_server ? 1 : 0, IIsServer() ? 1 : 0,
+		object.ID(),
+		object.cName().c_str(),
+		(u32)nearest_objects.size(),
+		start_position.distance_to(requested_position),
+		start_position.distance_to(result_position),
+		VPUSH(start_position),
+		VPUSH(requested_position),
+		VPUSH(result_position));
+
+	const u32 max_to_log = nearest_objects.size() < 6 ? (u32)nearest_objects.size() : 6u;
+	for (u32 i = 0; i < max_to_log; ++i)
+	{
+		const CObject* nearest = nearest_objects[i];
+		if (!nearest)
+			continue;
+
+		const CCustomMonster* nearest_monster = smart_cast<const CCustomMonster*>(nearest);
+		const CActor* nearest_actor = smart_cast<const CActor*>(nearest);
+		CPhysicsShellHolder* shell_holder = smart_cast<CPhysicsShellHolder*>(const_cast<CObject*>(nearest));
+		CPhysicsShell* physics_shell = shell_holder ? shell_holder->PPhysicsShell() : nullptr;
+
+		Msg("* [SP_MPHYS_BLOCK][OBJ] src=%s owner=%hu idx=%u id=%hu name=[%s] sect=[%s] enabled=%d destroy=%d spatial=%u collidable=%d alive=%d actor=%d monster=%d shell=%d shell_active=%d dist_req=%.3f dist_self=%.3f pos=(%.2f %.2f %.2f)",
+			kSpMphysSource,
+			object.ID(),
+			i,
+			nearest->ID(),
+			nearest->cName().c_str(),
+			nearest->cNameSect().c_str(),
+			nearest->getEnabled() ? 1 : 0,
+			nearest->getDestroy() ? 1 : 0,
+			nearest->spatial.type,
+			nearest->collidable.model ? 1 : 0,
+			nearest_monster && nearest_monster->g_Alive() ? 1 : 0,
+			nearest_actor ? 1 : 0,
+			nearest_monster ? 1 : 0,
+			physics_shell ? 1 : 0,
+			physics_shell && physics_shell->isActive() ? 1 : 0,
+			nearest->Position().distance_to(requested_position),
+			nearest->Position().distance_to(object.Position()),
+			VPUSH(nearest->Position()));
+	}
+}
+}
 #ifdef DEBUG
 #	include "PHDebug.h"
 
@@ -297,12 +505,19 @@ void CMovementManager::move_along_path(CPHMovementControl* movement_control, Fve
 			                                                                     ? 0.5f
 			                                                                     : 0.f), &object());
 
+		const u32 sp_mphys_nearest_count = (u32)m_nearest_objects.size();
+		const CObject* sp_mphys_nearest0 = sp_mphys_nearest_count ? m_nearest_objects.front() : nullptr;
+		const Fvector sp_mphys_start_position = object().Position();
+
 		// установить позицию
 		VERIFY(dist >= 0.f);
 		VERIFY(dist_to_target >= 0.f);
 		//	VERIFY				(dist <= dist_to_target);
 		motion.mul(dir_to_target, dist / dist_to_target);
 		dest_position.add(motion);
+		Fvector sp_mphys_requested_position = dest_position;
+		const float sp_mphys_real_motion = sp_mphys_start_position.distance_to(sp_mphys_requested_position);
+		const float sp_mphys_real_speed = time_delta > EPS_L ? sp_mphys_real_motion / time_delta : 0.f;
 
 		Fvector velocity = dir_to_target;
 		velocity.normalize_safe();
@@ -325,12 +540,20 @@ void CMovementManager::move_along_path(CPHMovementControl* movement_control, Fve
 			if (DBG_PH_MOVE_CONDITIONS(!ph_dbg_draw_mask.test(phDbgNeverUseAiPhMove)&&) !movement_control->TryPosition(
 				dest_position))
 			{
+				LPCSTR sp_mphys_branch = "try_fail";
 				movement_control->GetPosition(dest_position);
 				movement_control->Calculate(detail().path(), desirable_speed, detail().m_current_travel_point,
 				                            precision);
 
-				// проверка на хит
+				// Collision hit check.
 				apply_collision_hit(movement_control);
+
+				Fvector sp_mphys_result_position = dest_position;
+				movement_control->GetPosition(sp_mphys_result_position);
+				sp_mphys_diag_log(sp_mphys_branch, object(), movement_control, sp_mphys_start_position, sp_mphys_requested_position,
+				                  sp_mphys_result_position, desirable_speed, sp_mphys_real_speed, time_delta,
+				                  sp_mphys_nearest_count, sp_mphys_nearest0, detail().m_current_travel_point, dist, dist_to_target);
+				sp_mphys_diag_log_blockers(object(), m_nearest_objects, sp_mphys_start_position, sp_mphys_requested_position, sp_mphys_result_position);
 			}
 			else
 			{
@@ -338,6 +561,12 @@ void CMovementManager::move_along_path(CPHMovementControl* movement_control, Fve
 					if(ph_dbg_draw_mask.test(phDbgNeverUseAiPhMove)){movement_control->SetPosition(dest_position);
 					movement_control->DisableCharacter();})
 				movement_control->b_exect_position = true;
+				Fvector sp_mphys_result_position = dest_position;
+				movement_control->GetPosition(sp_mphys_result_position);
+                sp_mphys_diag_log("try_ok", object(), movement_control, sp_mphys_start_position, sp_mphys_requested_position,
+				                   sp_mphys_result_position, desirable_speed, sp_mphys_real_speed, time_delta,
+				                   sp_mphys_nearest_count, sp_mphys_nearest0, detail().m_current_travel_point, dist, dist_to_target);
+				sp_mphys_diag_log_blockers(object(), m_nearest_objects, sp_mphys_start_position, sp_mphys_requested_position, sp_mphys_result_position);
 			}
 			movement_control->GetPosition(dest_position);
 		}
@@ -347,6 +576,9 @@ void CMovementManager::move_along_path(CPHMovementControl* movement_control, Fve
 			movement_control->SetPosition(dest_position);
 			movement_control->DisableCharacter();
 			movement_control->b_exect_position = true;
+            sp_mphys_diag_log("direct_set", object(), movement_control, sp_mphys_start_position, sp_mphys_requested_position,
+			                   dest_position, desirable_speed, sp_mphys_real_speed, time_delta,
+			                   sp_mphys_nearest_count, sp_mphys_nearest0, detail().m_current_travel_point, dist, dist_to_target);
 		}
 		/*
 		} else { // есть физ. объекты

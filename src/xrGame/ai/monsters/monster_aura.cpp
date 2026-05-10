@@ -3,6 +3,7 @@
 #include "basemonster/base_monster.h"
 #include "../../Actor.h"
 #include "../../ActorEffector.h"
+#include "../../level.h"
 
 //#include "../../HudSound.h"
 
@@ -53,6 +54,9 @@ float monster_aura::override_if_debug(pcstr var_name, float const value) const
 
 float monster_aura::calculate() const
 {
+	if (IIsServer() || !Actor())
+		return 0.f;
+
 	float const distance = m_object->Position().distance_to(Actor()->Position());
 
 	float const epsilon = 0.0001f;
@@ -132,6 +136,9 @@ void monster_aura::load_from_ini(CInifile const* ini, pcstr const section, bool 
 
 bool monster_aura::check_work_condition() const
 {
+	if (IIsServer())
+		return false;
+
 	if (!m_enable_for_dead && !m_object->g_Alive())
 		return false;
 

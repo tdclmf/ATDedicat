@@ -38,6 +38,7 @@ extern int g_sv_mp_iDumpStatsPeriod;
 extern BOOL g_SV_Force_Artefact_Spawn;
 extern int g_Dump_Update_Write;
 extern int g_Dump_Update_Read;
+extern int g_sp_diag_net_updates;
 extern u32 g_sv_base_dwRPointFreezeTime;
 extern int g_sv_base_iVotingEnabled;
 extern BOOL g_sv_mp_bSpectator_FreeFly;
@@ -2206,6 +2207,7 @@ void register_mp_console_commands()
 
 	CMD4(CCC_Integer, "net_dbg_dump_update_write", &g_Dump_Update_Write, 0, 1);
 	CMD4(CCC_Integer, "net_dbg_dump_update_read", &g_Dump_Update_Read, 0, 1);
+	CMD4(CCC_Integer, "sp_diag_net_updates", &g_sp_diag_net_updates, 0, 1);
 
 	CMD1(CCC_ReturnToBase, "sv_return_to_base");
 	CMD1(CCC_GetServerAddress, "get_server_address");

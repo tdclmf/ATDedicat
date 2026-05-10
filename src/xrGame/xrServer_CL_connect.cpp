@@ -5,6 +5,60 @@
 #include "xrServer_Objects_Alife_Monsters.h"
 #include "Level.h"
 
+namespace
+{
+class CScopedConnectSpawnClientDataStrip
+{
+public:
+	CScopedConnectSpawnClientDataStrip(CSE_Abstract* entity, xrClientData* client, xrServer* server) :
+		m_entity(entity),
+		m_active(false)
+	{
+		if (!entity || !client || !server || !server->game)
+			return;
+
+		if (server->game->Type() != eGameIDSingle)
+			return;
+
+		if (client == server->GetServerClient())
+			return;
+
+		if (entity->s_flags.is(M_SPAWN_OBJECT_ASPLAYER))
+			return;
+
+		if (!smart_cast<CSE_ALifeHumanStalker*>(entity))
+			return;
+
+		if (entity->client_data.empty())
+			return;
+
+		m_active = true;
+		m_saved.swap(entity->client_data);
+		Msg("* [SV_CONNECT_SPAWN] stripped stalker client_data for remote client: id=%u section=[%s] bytes=%u",
+			entity->ID, entity->s_name.c_str(), (u32)m_saved.size());
+	}
+
+	~CScopedConnectSpawnClientDataStrip()
+	{
+		restore();
+	}
+
+	void restore()
+	{
+		if (!m_active || !m_entity)
+			return;
+
+		m_entity->client_data.swap(m_saved);
+		m_active = false;
+	}
+
+private:
+	CSE_Abstract* m_entity;
+	xr_vector<u8> m_saved;
+	bool m_active;
+};
+}
+
 
 void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Packet& P)
 {
@@ -38,6 +92,7 @@ void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Pack
 
 	// Process
 	Flags16 save = E->s_flags;
+	CScopedConnectSpawnClientDataStrip strip_client_data(E, CL, this);
 	//-------------------------------------------------
 	E->s_flags.set(M_SPAWN_UPDATE,TRUE);
 	if (0 == E->owner)
@@ -53,6 +108,7 @@ void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Pack
 		// Associate
 		E->owner = CL;
 		E->Spawn_Write(P,TRUE);
+		strip_client_data.restore();
 		E->UPDATE_Write(P);
 
 		CSE_ALifeObject* object = smart_cast<CSE_ALifeObject*>(E);
@@ -63,6 +119,7 @@ void xrServer::Perform_connect_spawn(CSE_Abstract* E, xrClientData* CL, NET_Pack
 	else
 	{
 		E->Spawn_Write(P, FALSE);
+		strip_client_data.restore();
 		E->UPDATE_Write(P);
 		//		CSE_ALifeObject*	object = smart_cast<CSE_ALifeObject*>(E);
 		//		VERIFY				(object);

@@ -18,6 +18,7 @@
 #include "level_graph.h"
 #include "alife_monster_movement_manager.h"
 #include "alife_monster_detail_path_manager.h"
+#include "player_actor_context.h"
 
 #pragma warning(push)
 #pragma warning(disable:4995)
@@ -25,6 +26,27 @@
 #pragma warning(pop)
 
 extern void setup_location_types_line(GameGraph::TERRAIN_VECTOR& m_vertex_types, LPCSTR string);
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+bool alife_group_actor_position(const Fvector& object_position, Fvector& actor_position)
+{
+	player_actor_context::SActorAnchor anchor;
+	if (player_actor_context::FindNearestRuntimePlayerAnchor(object_position, anchor))
+	{
+		actor_position = anchor.position;
+		return true;
+	}
+
+	CSE_ALifeCreatureActor* graph_actor = ai().alife().graph().actor();
+	if (!graph_actor || (g_dedicated_server && (graph_actor->ID == 0)))
+		return false;
+
+	actor_position = graph_actor->o_Position;
+	return true;
+}
+}
 
 CSE_ALifeItemWeapon* CSE_ALifeOnlineOfflineGroup::tpfGetBestWeapon(ALife::EHitType& tHitType, float& fHitPower)
 {
@@ -204,7 +226,11 @@ void CSE_ALifeOnlineOfflineGroup::try_switch_online()
 		VERIFY3((*I).second->can_switch_offline(),
 		        "Incorrect situation : some of the OnlineOffline group members cannot be switched online due to their personal properties",
 		        (*I).second->name_replace());
-		if (alife().graph().actor()->o_Position.distance_to((*I).second->o_Position) > alife().online_distance())
+		Fvector actor_position;
+		if (!alife_group_actor_position((*I).second->o_Position, actor_position))
+			continue;
+
+		if (actor_position.distance_to((*I).second->o_Position) > alife().online_distance())
 		{
 			continue;
 		}
@@ -241,7 +267,11 @@ void CSE_ALifeOnlineOfflineGroup::try_switch_offline()
 		        "Incorrect situation : some of the OnlineOffline group members cannot be switched online due to their personal properties",
 		        (*I).second->name_replace());
 
-		if (alife().graph().actor()->o_Position.distance_to((*I).second->o_Position) <= alife().offline_distance())
+		Fvector actor_position;
+		if (!alife_group_actor_position((*I).second->o_Position, actor_position))
+			continue;
+
+		if (actor_position.distance_to((*I).second->o_Position) <= alife().offline_distance())
 			return;
 	}
 

@@ -14,6 +14,68 @@
 #include "profiler.h"
 #include "stalker_movement_manager_smart_cover.h"
 
+namespace
+{
+enum EStalkerNetworkAnimationTrack
+{
+	eStalkerNetAnimGlobal = 0,
+	eStalkerNetAnimHead,
+	eStalkerNetAnimTorso,
+	eStalkerNetAnimLegs,
+	eStalkerNetAnimScript,
+	eStalkerNetAnimCount
+};
+
+bool network_motion_valid(u32 motion_value, MotionID& motion)
+{
+	if (motion_value == u32(u16(-1)))
+	{
+		motion.invalidate();
+		return false;
+	}
+
+	motion.val = motion_value;
+	return motion.valid();
+}
+
+void sync_network_animation_pair_time(
+	CStalkerAnimationPair& pair,
+	u32 motion_value,
+	u16 packed_time,
+	u8 flags,
+	u32& time_applied,
+	u32& missing,
+	u32& mismatched)
+{
+	if (!(flags & 1))
+		return;
+
+	MotionID server_motion;
+	if (!network_motion_valid(motion_value, server_motion))
+		return;
+
+	CBlend* blend = pair.blend();
+	if (!blend)
+	{
+		++missing;
+		return;
+	}
+
+	if (pair.animation() != server_motion)
+	{
+		++mismatched;
+		return;
+	}
+
+	if ((flags & 2) && (blend->timeTotal > EPS_L))
+	{
+		blend->timeCurrent = blend->timeTotal * (float(packed_time) / 65535.f);
+		clamp(blend->timeCurrent, 0.f, blend->timeTotal);
+		++time_applied;
+	}
+}
+}
+
 void CStalkerAnimationManager::play_delayed_callbacks()
 {
 	if (m_call_script_callback)
@@ -115,11 +177,23 @@ bool CStalkerAnimationManager::play_script()
 {
 	if (script_animations().empty())
 	{
+		if (m_network_script_animation_active && m_network_script_animation.valid())
+		{
+			if ((script().animation() != m_network_script_animation) || !script().blend())
+			{
+				script().animation(m_network_script_animation);
+				script().play(m_skeleton_animated, script_play_callback, false, false);
+			}
+			return (true);
+		}
+
 		m_start_new_script_animation = false;
 		script().reset();
 		return (false);
 	}
 
+	m_network_script_animation_active = false;
+	m_network_script_animation.invalidate();
 	play_script_impl();
 
 	return (true);
@@ -215,6 +289,164 @@ void CStalkerAnimationManager::play_legs()
 		return;
 
 	object().movement().setup_speed_from_animation(speed);
+}
+
+void CStalkerAnimationManager::apply_network_animation_state(
+	const u32* motion,
+	const u16* time,
+	const u8* flags,
+	u32 track_count,
+	u32& time_applied,
+	u32& missing,
+	u32& mismatched,
+	u32& forced)
+{
+	if (!m_skeleton_animated || !motion || !time || !flags || (track_count < eStalkerNetAnimCount))
+		return;
+
+	auto force_track = [&](
+		CStalkerAnimationPair& pair,
+		u32 motion_value,
+		u16 packed_time,
+		u8 track_flags,
+		PlayCallback callback,
+		bool continue_interrupted_animation)
+	{
+		if (!(track_flags & 1))
+			return;
+
+		MotionID server_motion;
+		if (!network_motion_valid(motion_value, server_motion))
+			return;
+
+		const bool same_motion = (pair.animation() == server_motion);
+		if (!same_motion)
+		{
+			++mismatched;
+			pair.animation(server_motion);
+			pair.play(m_skeleton_animated, callback, false, false, continue_interrupted_animation);
+			++forced;
+		}
+		else if (!pair.blend())
+		{
+			++missing;
+			pair.make_inactual();
+			pair.play(m_skeleton_animated, callback, false, false, continue_interrupted_animation);
+			++forced;
+		}
+
+		CBlend* blend = pair.blend();
+		if (!blend)
+		{
+			++missing;
+			return;
+		}
+
+		if ((track_flags & 2) && (blend->timeTotal > EPS_L))
+		{
+			blend->timeCurrent = blend->timeTotal * (float(packed_time) / 65535.f);
+			clamp(blend->timeCurrent, 0.f, blend->timeTotal);
+			++time_applied;
+		}
+	};
+
+	auto force_global_track = [&]()
+	{
+		if (!(flags[eStalkerNetAnimGlobal] & 1))
+			return;
+
+		MotionID server_motion;
+		if (!network_motion_valid(motion[eStalkerNetAnimGlobal], server_motion))
+			return;
+
+		const bool same_motion = (global().animation() == server_motion);
+		if (!same_motion)
+		{
+			++mismatched;
+			play_global_impl(server_motion, false);
+			++forced;
+		}
+		else if (!global().blend())
+		{
+			++missing;
+			global().make_inactual();
+			play_global_impl(server_motion, false);
+			++forced;
+		}
+
+		sync_network_animation_pair_time(
+			global(),
+			motion[eStalkerNetAnimGlobal],
+			time[eStalkerNetAnimGlobal],
+			flags[eStalkerNetAnimGlobal],
+			time_applied,
+			missing,
+			mismatched
+		);
+	};
+
+	force_global_track();
+
+	force_track(
+		head(),
+		motion[eStalkerNetAnimHead],
+		time[eStalkerNetAnimHead],
+		flags[eStalkerNetAnimHead],
+		head_play_callback,
+		false
+	);
+	force_track(
+		torso(),
+		motion[eStalkerNetAnimTorso],
+		time[eStalkerNetAnimTorso],
+		flags[eStalkerNetAnimTorso],
+		torso_play_callback,
+		false
+	);
+	force_track(
+		legs(),
+		motion[eStalkerNetAnimLegs],
+		time[eStalkerNetAnimLegs],
+		flags[eStalkerNetAnimLegs],
+		legs_play_callback,
+		!fis_zero(m_target_speed)
+	);
+
+	MotionID network_script_motion;
+	m_network_script_animation_active = (flags[eStalkerNetAnimScript] & 1) && network_motion_valid(motion[eStalkerNetAnimScript], network_script_motion);
+	if (m_network_script_animation_active)
+		m_network_script_animation = network_script_motion;
+	else
+		m_network_script_animation.invalidate();
+
+	force_track(
+		script(),
+		motion[eStalkerNetAnimScript],
+		time[eStalkerNetAnimScript],
+		flags[eStalkerNetAnimScript],
+		script_play_callback,
+		false
+	);
+
+	torso().synchronize(m_skeleton_animated, legs());
+}
+
+void CStalkerAnimationManager::reset_network_animation_state()
+{
+	clear_unsafe_callbacks();
+	global().reset();
+	head().reset();
+	torso().reset();
+	legs().reset();
+	script().reset();
+	m_network_script_animation_active = false;
+	m_network_script_animation.invalidate();
+
+	if (!m_skeleton_animated)
+		return;
+
+	for (u16 i = 0; i < MAX_PARTS; ++i)
+		m_skeleton_animated->LL_CloseCycle(i);
 }
 
 void CStalkerAnimationManager::update_impl()

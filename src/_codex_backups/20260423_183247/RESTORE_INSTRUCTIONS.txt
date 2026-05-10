@@ -1,4 +1,0 @@
-﻿RESTORE (manual):
-1) Copy files from files\\ back to repo root preserving relative paths.
-2) Or apply working_tree.diff with: git apply --index --reject <working_tree.diff>
-3) If needed, inspect git_status.txt and files_list.txt.

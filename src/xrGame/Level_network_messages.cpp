@@ -24,6 +24,7 @@ extern ENGINE_API bool g_dedicated_server;
 // True only while processing relayed M_CL_UPDATE for actor import.
 // Dedicated-single bridge uses this to prevent M_UPDATE_OBJECTS from overwriting remote actor orientation.
 bool g_dedicated_single_import_from_cl_update = false;
+extern int g_sp_diag_net_updates;
 
 namespace
 {
@@ -202,7 +203,10 @@ void CLevel::ClientReceive()
 			{
 				u32 imported_objects = 0;
 				bool malformed_packet = false;
-				if (OnClient() && !OnServer() && (Game().Type() == eGameIDSingle))
+				u32 diag_missing_objects = 0;
+				u32 diag_stalker_like_objects = 0;
+				xr_vector<xr_string> diag_samples;
+				if (g_sp_diag_net_updates || ((Game().Type() == eGameIDSingle) && OnClient() && !OnServer()))
 				{
 					NET_Packet stats_packet = *P;
 					while (!stats_packet.r_eof())
@@ -217,7 +221,35 @@ void CLevel::ClientReceive()
 						u8 object_size = 0;
 						stats_packet.r_u16(object_id);
 						stats_packet.r_u8(object_size);
-						(void)object_id;
+						if (g_sp_diag_net_updates)
+						{
+							CObject* diag_object = Objects.net_Find(object_id);
+							if (!diag_object)
+								++diag_missing_objects;
+
+							LPCSTR diag_name = diag_object ? diag_object->cName().c_str() : "<missing>";
+							LPCSTR diag_section = diag_object ? diag_object->cNameSect().c_str() : "<missing>";
+							const bool stalker_like =
+								diag_object &&
+								((diag_section && strstr(diag_section, "stalker")) ||
+								 (diag_name && strstr(diag_name, "stalker")) ||
+								 (diag_name && strstr(diag_name, "fanat")));
+
+							if (stalker_like)
+								++diag_stalker_like_objects;
+
+							if (diag_samples.size() < 16 && (stalker_like || !diag_object))
+							{
+								diag_samples.push_back(make_string(
+									"id=%u size=%u found=%d name=[%s] sect=[%s]",
+									object_id,
+									object_size,
+									diag_object ? 1 : 0,
+									diag_name,
+									diag_section
+								).c_str());
+							}
+						}
 
 						if (object_size > stats_packet.r_elapsed())
 						{
@@ -234,7 +266,19 @@ void CLevel::ClientReceive()
 					{
 						Msg("* [CL_NET_UPD] M_UPDATE_OBJECTS bytes=%u objects=%u malformed=%d",
 						    P->B.count, imported_objects, malformed_packet ? 1 : 0);
-						s_cl_update_objects_log_time = Device.dwTimeGlobal + 5000;
+						if (g_sp_diag_net_updates)
+						{
+							Msg("* [SP_NET][CL_PACKET] bytes=%u objects=%u malformed=%d stalker_like=%u missing=%u samples=%u",
+								P->B.count,
+								imported_objects,
+								malformed_packet ? 1 : 0,
+								diag_stalker_like_objects,
+								diag_missing_objects,
+								(u32)diag_samples.size());
+							for (xr_vector<xr_string>::const_iterator it = diag_samples.begin(); it != diag_samples.end(); ++it)
+								Msg("* [SP_NET][CL_CHUNK] %s", it->c_str());
+						}
+						s_cl_update_objects_log_time = Device.dwTimeGlobal + (g_sp_diag_net_updates ? 1000 : 5000);
 					}
 				}
 
@@ -274,6 +318,7 @@ void CLevel::ClientReceive()
 				packet_actor_pos.set(0.f, 0.f, 0.f);
 				float packet_actor_model_yaw = 0.f;
 				bool packet_actor_pos_valid = false;
+				bool packet_actor_pos_spatial_valid = false;
 				if (is_actor_update)
 				{
 					NET_Packet dbg_packet = *P;
@@ -290,6 +335,9 @@ void CLevel::ClientReceive()
 						dbg_packet.r_vec3(packet_actor_pos);
 						dbg_packet.r_float(packet_actor_model_yaw);
 						packet_actor_pos_valid = true;
+						packet_actor_pos_spatial_valid =
+							_valid(packet_actor_pos) &&
+							(!ai().get_level_graph() || ai().level_graph().valid_vertex_position(packet_actor_pos));
 					}
 				}
 
@@ -315,12 +363,64 @@ void CLevel::ClientReceive()
 				O->net_Import(*P);
 				g_dedicated_single_import_from_cl_update = old_cl_update_import;
 
+				if (g_dedicated_server && OnServer() && Game().Type() == eGameIDSingle && packet_actor_pos_valid)
+				{
+					CActor* actor = smart_cast<CActor*>(O);
+					if (actor && packet_actor_pos_spatial_valid)
+					{
+						Fmatrix transform;
+						transform.rotateY(packet_actor_model_yaw);
+						transform.c.set(packet_actor_pos);
+						actor->ForceTransform(transform);
+
+						static u32 s_actor_pos_sync_next = 0;
+						static u32 s_actor_pos_sync_count = 0;
+						if (g_sp_diag_net_updates)
+						{
+							const u32 now = Device.dwTimeGlobal;
+							if (now >= s_actor_pos_sync_next)
+							{
+								s_actor_pos_sync_next = now + 1000;
+								s_actor_pos_sync_count = 0;
+							}
+
+							if (s_actor_pos_sync_count < 16)
+							{
+								++s_actor_pos_sync_count;
+								Msg("* [SP_ACTOR_POS_SYNC] actor=%u name=[%s] packet_pos=(%.2f %.2f %.2f) applied_pos=(%.2f %.2f %.2f) yaw=%.3f dir=(%.3f %.3f %.3f)",
+									actor->ID(), actor->cName().c_str(),
+									VPUSH(packet_actor_pos), VPUSH(actor->Position()), packet_actor_model_yaw,
+									VPUSH(actor->XFORM().k));
+							}
+						}
+					}
+					else if (actor && g_sp_diag_net_updates)
+					{
+						static u32 s_actor_pos_skip_next = 0;
+						static u32 s_actor_pos_skip_count = 0;
+						const u32 now = Device.dwTimeGlobal;
+						if (now >= s_actor_pos_skip_next)
+						{
+							s_actor_pos_skip_next = now + 1000;
+							s_actor_pos_skip_count = 0;
+						}
+
+						if (s_actor_pos_skip_count < 16)
+						{
+							++s_actor_pos_skip_count;
+							Msg("* [SP_ACTOR_POS_SYNC_SKIP] actor=%u name=[%s] reason=invalid_level_pos packet_pos=(%.2f %.2f %.2f) current=(%.2f %.2f %.2f) yaw=%.3f",
+								actor->ID(), actor->cName().c_str(),
+								VPUSH(packet_actor_pos), VPUSH(actor->Position()), packet_actor_model_yaw);
+						}
+					}
+				}
+
 				if (OnServer())
 				{
 					//---------------------------------------------------
 					UpdateDeltaUpd(timeServer());
 
-					if (packet_actor_pos_valid && smart_cast<CActor*>(O))
+					if (packet_actor_pos_valid && packet_actor_pos_spatial_valid && smart_cast<CActor*>(O))
 						apply_client_crow_touch(*this, O->ID(), packet_actor_pos);
 
 					if (!pObjects4CrPr.empty() || !pActors4CrPr.empty())

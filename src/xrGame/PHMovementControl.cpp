@@ -24,6 +24,7 @@
 #include "detail_path_manager.h"
 #include "../xrEngine/gamemtllib.h"
 #include "../xrEngine/xr_object.h"
+#include "../xrEngine/x_ray.h"
 #include "CaptureBoneCallback.h"
 #include "Level.h"
 #include "physicsshellholder.h"
@@ -34,6 +35,61 @@
 //#include	"../Include/xrRender/KinematicsAnimated.h"
 #include "../Include/xrRender/Kinematics.h"
 
+namespace
+{
+bool sp_trypos_diag_enabled()
+{
+	return Core.Params && strstr(Core.Params, "-sp_trypos_diag");
+}
+
+bool sp_trypos_wrap_allow()
+{
+	static u32 next_time = 0;
+	static u32 count = 0;
+	const u32 now = Device.dwTimeGlobal;
+	if (count < 128)
+	{
+		++count;
+		return true;
+	}
+
+	if (now < next_time)
+		return false;
+
+	next_time = now + 1000;
+	count = 0;
+	return true;
+}
+
+void sp_trypos_wrap_log(CPHMovementControl* control, IPhysicsShellHolder* ref_object, LPCSTR reason,
+	const Fvector& requested_pos, const Fvector& control_pos, bool character_ret, bool final_ret)
+{
+	if (!sp_trypos_diag_enabled() || !sp_trypos_wrap_allow())
+		return;
+
+	Fvector velocity;
+	velocity.set(0.f, 0.f, 0.f);
+	if (control)
+		velocity = control->GetVelocity();
+
+	Msg("* [SP_TRYPOS_WRAP] id=%hu name=[%s] sect=[%s] reason=%s char_ret=%d final_ret=%d external_impulse=%d exec=%d exist=%d enabled=%d physics_only=%d req=(%.3f %.3f %.3f) ctrl=(%.3f %.3f %.3f) move=%.4f vel=(%.3f %.3f %.3f)",
+		ref_object ? ref_object->ObjectID() : u16(-1),
+		ref_object ? ref_object->ObjectName() : "",
+		ref_object ? ref_object->ObjectNameSect() : "",
+		reason ? reason : "",
+		character_ret ? 1 : 0,
+		final_ret ? 1 : 0,
+		control && control->bExernalImpulse ? 1 : 0,
+		control && control->b_exect_position ? 1 : 0,
+		control && control->CharacterExist() ? 1 : 0,
+		control && control->IsCharacterEnabled() ? 1 : 0,
+		control && control->PhysicsOnlyMode() ? 1 : 0,
+		VPUSH(requested_pos),
+		VPUSH(control_pos),
+		requested_pos.distance_to(control_pos),
+		VPUSH(velocity));
+}
+}
 #define GROUND_FRICTION	10.0f
 #define AIR_FRICTION	0.01f
 #define WALL_FRICTION	3.0f
@@ -43,6 +99,27 @@
 #define def_Y_SIZE_2	0.8f
 #define def_Z_SIZE_2	0.35f
 
+extern int g_sp_diag_net_updates;
+
+namespace
+{
+void sp_phctrl_diag_log(CObject* object, LPCSTR event_name, int exist_before, int exist_after, int enabled_before,
+                        int enabled_after, int non_interactive_before, int non_interactive_after)
+{
+	if (!g_sp_diag_net_updates || !object)
+		return;
+
+	if ((exist_before == exist_after) && (enabled_before == enabled_after) &&
+		(non_interactive_before == non_interactive_after))
+		return;
+
+	const Fvector& position = object->Position();
+	Msg("* [SP_PHCTRL] id=%hu name=[%s] sect=[%s] event=%s exist=%d->%d enabled=%d->%d noninteractive=%d->%d pos=(%.2f %.2f %.2f)",
+	    object->ID(), object->cName().c_str(), object->cNameSect().c_str(), event_name,
+	    exist_before, exist_after, enabled_before, enabled_after, non_interactive_before,
+	    non_interactive_after, position.x, position.y, position.z);
+}
+}
 const u64 after_creation_collision_hit_block_steps_number = 100;
 
 CPHMovementControl::CPHMovementControl(CObject* parent)
@@ -1009,12 +1086,16 @@ bool CPHMovementControl::TryPosition(Fvector& pos)
 #endif
 	if (m_character->b_exist)
 	{
-		bool ret = m_character->TryPosition(pos, b_exect_position) && !bExernalImpulse;
+		bool character_ret = m_character->TryPosition(pos, b_exect_position);
+		bool ret = character_ret && !bExernalImpulse;
 		m_character->GetPosition(vPosition);
+		if (!ret)
+			sp_trypos_wrap_log(this, m_character->PhysicsRefObject(), character_ret ? "external_impulse" : "character_false", pos, vPosition, character_ret, ret);
 		return (ret);
 	}
 
 	vPosition.set(pos);
+	sp_trypos_wrap_log(this, m_character->PhysicsRefObject(), "no_character_exist", pos, vPosition, true, true);
 	return (true);
 }
 
@@ -1129,12 +1210,19 @@ void CPHMovementControl::DestroyCharacter()
 {
 	VERIFY(m_character);
 
+	const int exist_before = m_character->b_exist ? 1 : 0;
+	const int enabled_before = (m_character->b_exist && m_character->IsEnabled()) ? 1 : 0;
+	const int non_interactive_before = bNonInteractiveMode ? 1 : 0;
+
 	// Remove Grass bender if PHCharacter is not NULL
 	if (m_character->PhysicsRefObject() != NULL)
 		g_pGamePersistent->GrassBendersRemoveById(m_character->PhysicsRefObject()->ObjectID());
 
 	m_character->Destroy();
 	phcapture_destroy(m_capture);
+	sp_phctrl_diag_log(pObject, "DestroyCharacter", exist_before, m_character->b_exist ? 1 : 0, enabled_before,
+	                    (m_character->b_exist && m_character->IsEnabled()) ? 1 : 0, non_interactive_before,
+	                    bNonInteractiveMode ? 1 : 0);
 	//xr_delete(m_capture);
 	//xr_delete<CPHSimpleCharacter>(m_character);
 }
@@ -1222,6 +1310,10 @@ void CPHMovementControl::SetMaterial(u16 material)
 
 void CPHMovementControl::CreateCharacter()
 {
+	const int exist_before = (m_character && m_character->b_exist) ? 1 : 0;
+	const int enabled_before = (m_character && m_character->b_exist && m_character->IsEnabled()) ? 1 : 0;
+	const int non_interactive_before = bNonInteractiveMode ? 1 : 0;
+
 	dVector3 size = {aabb.x2 - aabb.x1, aabb.y2 - aabb.y1, aabb.z2 - aabb.z1};
 	m_character->Create(size);
 	m_character->SetMaterial(m_material);
@@ -1240,6 +1332,9 @@ void CPHMovementControl::CreateCharacter()
 	trying_poses[1].set(vPosition);
 	trying_poses[2].set(vPosition);
 	trying_poses[3].set(vPosition);
+	sp_phctrl_diag_log(pObject, "CreateCharacter", exist_before, m_character->b_exist ? 1 : 0, enabled_before,
+	                    (m_character->b_exist && m_character->IsEnabled()) ? 1 : 0, non_interactive_before,
+	                    bNonInteractiveMode ? 1 : 0);
 }
 
 CPHSynchronize* CPHMovementControl::GetSyncItem()
@@ -1584,6 +1679,11 @@ void CPHMovementControl::SetNonInteractive(bool v)
 		return;
 	if (bNonInteractiveMode == v)
 		return;
+
+	const int exist_before = m_character->b_exist ? 1 : 0;
+	const int enabled_before = m_character->IsEnabled() ? 1 : 0;
+	const int non_interactive_before = bNonInteractiveMode ? 1 : 0;
+
 	if (v)
 	{
 		m_character->SetNonInteractive(v);
@@ -1596,6 +1696,9 @@ void CPHMovementControl::SetNonInteractive(bool v)
 		m_character->SetNonInteractive(v);
 	}
 	bNonInteractiveMode = v;
+	sp_phctrl_diag_log(pObject, v ? "SetNonInteractive(true)" : "SetNonInteractive(false)", exist_before,
+	                    m_character->b_exist ? 1 : 0, enabled_before, m_character->IsEnabled() ? 1 : 0,
+	                    non_interactive_before, bNonInteractiveMode ? 1 : 0);
 }
 
 //dBodyID		CPHMovementControl::	GetBody						( )		
@@ -1620,7 +1723,13 @@ void CPHMovementControl::SetJumpUpVelocity(float velocity)
 void CPHMovementControl::EnableCharacter()
 {
 	if (m_character && m_character->b_exist)
+	{
+		const int enabled_before = m_character->IsEnabled() ? 1 : 0;
+		const int non_interactive_before = bNonInteractiveMode ? 1 : 0;
 		m_character->Enable();
+		sp_phctrl_diag_log(pObject, "EnableCharacter", 1, 1, enabled_before, m_character->IsEnabled() ? 1 : 0,
+		                    non_interactive_before, bNonInteractiveMode ? 1 : 0);
+	}
 }
 
 
@@ -1704,7 +1813,13 @@ bool CPHMovementControl::IsCharacterEnabled()
 void CPHMovementControl::DisableCharacter()
 {
 	VERIFY(m_character);
+	const int exist_before = m_character->b_exist ? 1 : 0;
+	const int enabled_before = (m_character->b_exist && m_character->IsEnabled()) ? 1 : 0;
+	const int non_interactive_before = bNonInteractiveMode ? 1 : 0;
 	m_character->Disable();
+	sp_phctrl_diag_log(pObject, "DisableCharacter", exist_before, m_character->b_exist ? 1 : 0, enabled_before,
+	                    (m_character->b_exist && m_character->IsEnabled()) ? 1 : 0, non_interactive_before,
+	                    bNonInteractiveMode ? 1 : 0);
 }
 
 void CPHMovementControl::GetCharacterPosition(Fvector& P)

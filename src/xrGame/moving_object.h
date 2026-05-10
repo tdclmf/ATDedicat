@@ -52,6 +52,7 @@ public:
 	IC const CEntityAlive& object() const;
 	void ignore(const CObject* object);
 	bool ignored(const CObject* object);
+	IC static u32 current_action_frame();
 	IC void action(const action_type& action);
 	IC void action(const action_type& action, const Fvector& action_position);
 	IC const action_type& action() const;

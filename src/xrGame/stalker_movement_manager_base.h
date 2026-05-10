@@ -80,6 +80,7 @@ public:
 	void set_nearest_accessible_position(Fvector desired_position, u32 level_vertex_id);
 	float speed(const EMovementDirection& movement_direction);
 	void setup_speed_from_animation(const float& speed);
+	void setup_state_from_network(EBodyState body_state, EMovementType movement_type, EMentalState mental_state, const float& speed);
 
 public:
 	IC SBoneRotation const& head_orientation() const;

@@ -6480,6 +6480,9 @@
     <ClInclude Include="..\game_sv_single.h">
       <Filter>Core\Server\Games\server\single</Filter>
     </ClInclude>
+    <ClInclude Include="..\player_actor_context.h">
+      <Filter>Core\Client\Level</Filter>
+    </ClInclude>
     <ClInclude Include="..\game_sv_teamdeathmatch.h">
       <Filter>Core\Server\Games\server\team_deathmatch</Filter>
     </ClInclude>
@@ -7335,6 +7338,7 @@
     <ClInclude Include="..\script_imgui_inline.h">
       <Filter>UI\Common\ImGui</Filter>
     </ClInclude>
+    <ClInclude Include="alife_mp.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\damage_manager.cpp">
@@ -9950,6 +9954,9 @@
     <ClCompile Include="..\game_sv_single.cpp">
       <Filter>Core\Server\Games\server\single</Filter>
     </ClCompile>
+    <ClCompile Include="..\player_actor_context.cpp">
+      <Filter>Core\Client\Level</Filter>
+    </ClCompile>
     <ClCompile Include="..\game_sv_teamdeathmatch.cpp">
       <Filter>Core\Server\Games\server\team_deathmatch</Filter>
     </ClCompile>
@@ -10952,6 +10959,7 @@
     <ClCompile Include="..\script_imgui_script.cpp">
       <Filter>UI\Common\ImGui</Filter>
     </ClCompile>
+    <ClCompile Include="alife_mp.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="..\Explosive.h">

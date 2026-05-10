@@ -322,8 +322,9 @@ void CAI_Stalker::Hit(SHit* pHDS)
 	{
 		bool already_critically_wounded = critically_wounded();
 
-		if (!already_critically_wounded)
+		if (!already_critically_wounded && !Remote())
 		{
+			// Remote clients receive hit state from the server; agent cover state is authoritative-side only.
 			CMemberOrder* member_order = agent_manager().member().get_member(ID());
 			const CCoverPoint* cover = member_order ? member_order->cover() : nullptr;
 			if (!invulnerable() && cover && HDS.initiator() &&

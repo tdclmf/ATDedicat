@@ -9,12 +9,39 @@
 #include "gamepersistent.h"
 #include "xrServer.h"
 #include "actor.h"
+#include "CharacterPhysicsSupport.h"
 #include "level.h"
+#include "level_graph.h"
+#include "ai_object_location.h"
+#include "game_cl_base.h"
 #include "gametaskmanager.h"
+#include "PHMovementControl.h"
+#include "player_actor_context.h"
 #include "alife_registry_wrappers.h"
 #include "../xrEngine/x_ray.h"
 #include "../xrEngine/dedicated_server_only.h"
 #include "../xrEngine/no_single.h"
+
+static bool single_with_actor_diag()
+{
+	return strstr(Core.Params, "-withactor");
+}
+
+static bool single_mp_bridge_enabled()
+{
+	return g_dedicated_server || single_with_actor_diag();
+}
+
+static bool single_is_remote_client(xrClientData* client, xrServer& server)
+{
+	return client && (client != server.GetServerClient());
+}
+
+static bool single_mp_bridge_enabled_for_client(xrClientData* client, xrServer& server)
+{
+	return single_mp_bridge_enabled() || single_is_remote_client(client, server);
+}
+
 
 game_sv_Single::game_sv_Single()
 {
@@ -36,6 +63,7 @@ void game_sv_Single::Update()
 void game_sv_Single::Create(shared_str& options)
 {
 	inherited::Create(options);
+	Msg("--- [SV][WITHACTOR] server actor diagnostics: %s", single_with_actor_diag() ? "enabled (-withactor)" : "disabled (system client actor skipped)");
 
 	if (strstr(*options, "/alife"))
 		m_alife_simulator = xr_new<CALifeSimulator>(&server(), &options);
@@ -46,23 +74,41 @@ void game_sv_Single::Create(shared_str& options)
 
 void game_sv_Single::RespawnPlayer(ClientID id_who, bool bReady)
 {
-	if (!g_dedicated_server)
-		return;
-
 	xrClientData* xrCData = server().ID_to_client(id_who);
 	if (!xrCData || !xrCData->ps)
 		return;
 
-	if (g_dedicated_server && xrCData == server().GetServerClient())
+	if (!single_mp_bridge_enabled_for_client(xrCData, server()))
+		return;
+
+	const bool server_observer_actor = (xrCData == server().GetServerClient()) && single_with_actor_diag();
+	if ((xrCData == server().GetServerClient()) && !server_observer_actor)
 	{
 		xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP);
-		Msg("--- [SV] Dedicated server system client respawn request ignored.");
+		Msg("--- [SV] Server system client respawn request ignored; use -withactor to spawn original actor for diagnostics.");
 		return;
 	}
+	if (server_observer_actor)
+		Msg("--- [SV][WITHACTOR] Server system client respawn allowed: spawning original actor for server-side observation.");
 
 	CSE_Abstract* pOwner = xrCData->owner;
 	CSE_ALifeCreatureActor* pA = pOwner ? smart_cast<CSE_ALifeCreatureActor*>(pOwner) : nullptr;
 	CSE_Spectator* pS = pOwner ? smart_cast<CSE_Spectator*>(pOwner) : nullptr;
+
+	if (server_observer_actor && pA)
+	{
+		pOwner->s_flags.set(M_SPAWN_OBJECT_LOCAL, TRUE);
+		pOwner->s_flags.set(M_SPAWN_OBJECT_ASPLAYER, TRUE);
+		pA->set_killer_id(ALife::_OBJECT_ID(-1));
+		pA->set_health(1.f);
+		pA->m_bDeathIsProcessed = false;
+		xrCData->ps->SetGameID(pOwner->ID);
+		xrCData->ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR | GAME_PLAYER_FLAG_VERY_VERY_DEAD | GAME_PLAYER_FLAG_SKIP);
+		xrCData->ps->setFlag(GAME_PLAYER_FLAG_READY);
+		Msg("--- [SV][WITHACTOR] existing original actor [%u] kept for server-side observation.", pOwner->ID);
+		signal_Syncronize();
+		return;
+	}
 
 	if (pA)
 	{
@@ -82,7 +128,7 @@ void game_sv_Single::RespawnPlayer(ClientID id_who, bool bReady)
 
 	// Dedicated-single bridge: use mp_actor pipeline for networked client players.
 	// This keeps MP net state import/export and script binding behavior.
-	SpawnPlayer(id_who, "mp_actor");
+	SpawnPlayer(id_who, server_observer_actor ? "actor" : "mp_actor");
 
 	if (xrCData->owner)
 	{
@@ -98,7 +144,7 @@ void game_sv_Single::RespawnPlayer(ClientID id_who, bool bReady)
 			CA->m_bDeathIsProcessed = false;
 		}
 
-		Msg("--- [SV] mp_actor [%u] successfully created and assigned to [%s] with LOCAL and ASPLAYER flags. (alive forced)", E->ID, xrCData->name.c_str());
+		Msg("--- [SV] player entity [%u:%s] successfully created and assigned to [%s] with LOCAL and ASPLAYER flags. (alive forced)", E->ID, E->s_name.c_str(), xrCData->name.c_str());
 	}
 
 	if (xrCData->owner)
@@ -125,6 +171,21 @@ void game_sv_Single::OnCreate(u16 id_who)
 
 	CSE_Abstract* e_who = get_entity_from_eid(id_who);
 	VERIFY(e_who);
+
+	CSE_ALifeDynamicObject* dedicated_mp_actor = smart_cast<CSE_ALifeDynamicObject*>(e_who);
+	if (single_with_actor_diag() && !xr_strcmp(*e_who->s_name, "actor"))
+		Msg("--- [SV][WITHACTOR] original actor [%u] enters full ALife/script registration for diagnostics.", id_who);
+	if (dedicated_mp_actor && !xr_strcmp(*e_who->s_name, "mp_actor"))
+	{
+		// Remote players must be the ALife graph actor for online switching,
+		// but full SP registration runs se_actor scripts and duplicates story NPCs.
+		dedicated_mp_actor->m_bOnline = true;
+		alife().graph().update(dedicated_mp_actor);
+		e_who->m_bALifeControl = false;
+		Msg("--- [SV] Single MP bridge mp_actor [%u] registered as graph actor only.", id_who);
+		return;
+	}
+
 	if (!e_who->m_bALifeControl)
 		return;
 
@@ -382,7 +443,7 @@ void game_sv_Single::remove_all_restrictions(NET_Packet& packet, u16 id)
 void game_sv_Single::sls_default()
 {
 	static u32 s_next_diag_log_time = 0;
-	if (g_dedicated_server && Device.dwTimeGlobal >= s_next_diag_log_time)
+	if (single_mp_bridge_enabled() && Device.dwTimeGlobal >= s_next_diag_log_time)
 	{
 		CSE_ALifeCreatureActor* actor = ai().get_alife() ? ai().alife().graph().actor() : nullptr;
 		IClient* server_client = server().GetServerClient();
@@ -437,10 +498,42 @@ void game_sv_Single::restart_simulator(LPCSTR saved_game_name)
 }
 
 
-// NEW FUCA
+// Dedicated-single spawn anchor.
 
 void game_sv_Single::assign_RP(CSE_Abstract* E, game_PlayerState* ps_who)
 {
+	CSE_ALifeCreatureActor* const system_actor =
+		ai().get_alife() ? smart_cast<CSE_ALifeCreatureActor*>(get_entity_from_eid(0)) : nullptr;
+	CSE_ALifeCreatureActor* const graph_actor =
+		ai().get_alife() ? ai().alife().graph().actor() : nullptr;
+	CSE_ALifeCreatureActor* const source_actor = system_actor ? system_actor : graph_actor;
+	if (source_actor)
+	{
+		E->o_Position.set(source_actor->o_Position);
+		E->o_Angle.set(source_actor->o_Angle);
+
+		CSE_ALifeCreatureActor* target_actor = smart_cast<CSE_ALifeCreatureActor*>(E);
+		if (target_actor)
+			target_actor->o_torso = source_actor->o_torso;
+
+		CSE_ALifeObject* target_object = smart_cast<CSE_ALifeObject*>(E);
+		CSE_ALifeObject* source_object = smart_cast<CSE_ALifeObject*>(source_actor);
+		if (target_object && source_object)
+		{
+			target_object->m_tGraphID = source_object->m_tGraphID;
+			target_object->m_tNodeID = source_object->m_tNodeID;
+		}
+
+		Msg("--- [SV] Single MP bridge assign_RP: copied SP actor anchor [%u:%s] pos=(%.2f %.2f %.2f) graph=%u node=%u to [%s].",
+			source_actor->ID,
+			source_actor->name_replace() ? source_actor->name_replace() : "<actor>",
+			VPUSH(E->o_Position),
+			target_object ? target_object->m_tGraphID : u32(-1),
+			target_object ? target_object->m_tNodeID : u32(-1),
+			E->name_replace() ? E->name_replace() : *E->s_name);
+		return;
+	}
+
 	for (const auto& kv : ai().alife().objects().objects())
 	{
 		if (!kv.second || !kv.second->m_bOnline)
@@ -450,6 +543,22 @@ void game_sv_Single::assign_RP(CSE_Abstract* E, game_PlayerState* ps_who)
 		{
 			E->o_Position.set(kv.second->o_Position);
 			E->o_Angle.set(kv.second->o_Angle);
+
+			CSE_ALifeObject* target_object = smart_cast<CSE_ALifeObject*>(E);
+			CSE_ALifeObject* source_object = smart_cast<CSE_ALifeObject*>(kv.second);
+			if (target_object && source_object)
+			{
+				target_object->m_tGraphID = source_object->m_tGraphID;
+				target_object->m_tNodeID = source_object->m_tNodeID;
+			}
+
+			Msg("--- [SV] Single MP bridge assign_RP: fallback online stalker [%u:%s] pos=(%.2f %.2f %.2f) graph=%u node=%u to [%s].",
+				kv.second->ID,
+				kv.second->name_replace() ? kv.second->name_replace() : "<stalker>",
+				VPUSH(E->o_Position),
+				target_object ? target_object->m_tGraphID : u32(-1),
+				target_object ? target_object->m_tNodeID : u32(-1),
+				E->name_replace() ? E->name_replace() : *E->s_name);
 			return;
 		}
 	}
@@ -457,6 +566,8 @@ void game_sv_Single::assign_RP(CSE_Abstract* E, game_PlayerState* ps_who)
 	Fvector F = Fvector().set(0, 0, 0);
 	E->o_Position.set(F);
 	E->o_Angle.set(F);
+	Msg("! [SV] Single MP bridge assign_RP: no SP actor or online stalker found for [%s], using origin fallback.",
+		E->name_replace() ? E->name_replace() : *E->s_name);
 }
 
 void game_sv_Single::OnPlayerConnect(ClientID id_who)
@@ -476,7 +587,7 @@ void game_sv_Single::OnPlayerConnect(ClientID id_who)
 	ps_who->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
 	ps_who->resetFlag(GAME_PLAYER_FLAG_SKIP + GAME_PLAYER_FLAG_VERY_VERY_DEAD);
 
-	if (g_dedicated_server && xrCData == server().GetServerClient())
+	if (single_mp_bridge_enabled() && (xrCData == server().GetServerClient()) && !single_with_actor_diag())
 	{
 		ps_who->setFlag(GAME_PLAYER_FLAG_SKIP);
 		return;
@@ -490,7 +601,8 @@ void game_sv_Single::OnPlayerDisconnect(ClientID id_who, LPSTR Name, u16 GameID)
 	// Dedicated-single bridge:
 	// do not route disconnect through MP KillPlayer/GE_DIE path
 	// (it triggers death callbacks and unstable teardown order for actor proxies).
-	if (!g_dedicated_server)
+	xrClientData* xrCData = server().ID_to_client(id_who);
+	if (!single_mp_bridge_enabled_for_client(xrCData, server()))
 	{
 		inherited::OnPlayerDisconnect(id_who, Name, GameID);
 		return;
@@ -502,7 +614,6 @@ void game_sv_Single::OnPlayerDisconnect(ClientID id_who, LPSTR Name, u16 GameID)
 	P.w_stringZ(Name);
 	u_EventSend(P);
 
-	xrClientData* xrCData = server().ID_to_client(id_who);
 	if (xrCData && xrCData->ps)
 	{
 		xrCData->ps->setFlag(GAME_PLAYER_FLAG_SKIP + GAME_PLAYER_FLAG_SPECTATOR + GAME_PLAYER_FLAG_VERY_VERY_DEAD);
@@ -510,6 +621,14 @@ void game_sv_Single::OnPlayerDisconnect(ClientID id_who, LPSTR Name, u16 GameID)
 
 	if (GameID != u16(-1))
 	{
+		CObject* const current_entity = Level().CurrentEntity();
+		if (current_entity && current_entity->ID() == GameID)
+		{
+			Level().SetControlEntity(nullptr);
+			Level().SetEntity(nullptr);
+			Msg("--- [SV] Dedicated single disconnect: cleared current runtime actor anchor [%u].", GameID);
+		}
+
 		CSE_Abstract* pSObject = get_entity_from_eid(GameID);
 		if (pSObject)
 		{
@@ -536,15 +655,15 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 	if (!xrCData || !xrCData->ps)
 		return;
 
-	// Keep vanilla single-player flow untouched.
-	// Dedicated bridge logic is enabled only for dedicated runtime.
-	if (!g_dedicated_server)
+	// Keep vanilla single-player flow untouched, but always use the bridge for
+	// real remote clients so listen-server sessions still spawn an mp_actor.
+	if (!single_mp_bridge_enabled_for_client(xrCData, server()))
 		return;
 
-	// Системный клиент дедика нам не нужен в мире
-	if (g_dedicated_server && xrCData == server().GetServerClient())
+	const bool server_observer_actor = (xrCData == server().GetServerClient()) && single_with_actor_diag();
+	if ((xrCData == server().GetServerClient()) && !server_observer_actor)
 	{
-		Msg("--- [SV] Dedicated Server system client registered. Skipping body spawn.");
+		Msg("--- [SV] Server system client registered. Skipping body spawn; use -withactor for diagnostics.");
 		return;
 	}
 
@@ -559,8 +678,11 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 		SendGamTasksData(id_who);
 	}
 
-	xrCData->ps->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
-	Msg("--- [SV] Client [%s] finished connecting. Spawning mp_actor... players=%u server_client=%u",
+	if (server_observer_actor && xrCData->owner)
+		xrCData->ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR | GAME_PLAYER_FLAG_VERY_VERY_DEAD | GAME_PLAYER_FLAG_SKIP);
+	else
+		xrCData->ps->setFlag(GAME_PLAYER_FLAG_SPECTATOR);
+	Msg("--- [SV] Client [%s] finished connecting. Spawning player body if needed... players=%u server_client=%u",
 		xrCData->name.c_str(),
 		get_players_count(),
 		server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
@@ -575,13 +697,13 @@ void game_sv_Single::OnPlayerConnectFinished(ClientID id_who)
 
 void game_sv_Single::OnPlayerReady(ClientID id)
 {
-	if (!g_dedicated_server)
-		return;
-
 	if (m_phase == GAME_PHASE_INPROGRESS)
 	{
 		xrClientData* xrCData = server().ID_to_client(id);
 		if (!xrCData || !xrCData->ps)
+			return;
+
+		if (!single_mp_bridge_enabled_for_client(xrCData, server()))
 			return;
 
 		Msg("--- [SV] OnPlayerReady entry for [%s]: id=%u owner=%u players=%u server_client=%u",
@@ -592,7 +714,7 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 			server().GetServerClient() ? server().GetServerClient()->ID.value() : 0);
 
 		game_PlayerState* ps = xrCData->ps;
-		if (g_dedicated_server && xrCData == server().GetServerClient())
+		if (single_mp_bridge_enabled() && (xrCData == server().GetServerClient()) && !single_with_actor_diag())
 		{
 			ps->setFlag(GAME_PLAYER_FLAG_SKIP);
 			return;
@@ -600,7 +722,7 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 
 		if (!xrCData->owner)
 		{
-			Msg("--- [SV] No owner for [%s], spawning mp_actor directly...", xrCData->name.c_str());
+			Msg("--- [SV] No owner for [%s], spawning player body directly...", xrCData->name.c_str());
 			RespawnPlayer(id, true);
 			if (!xrCData->owner)
 				return;
@@ -608,8 +730,9 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 
 			if (ps->IsSkip())
 			{
-				// Non-system client can be stuck with SKIP from early connect phase.
-				if (xrCData != server().GetServerClient())
+				// Non-system clients and explicit -withactor observer can be stuck
+				// with SKIP from early connect phase.
+				if ((xrCData != server().GetServerClient()) || single_with_actor_diag())
 				{
 					ps->resetFlag(GAME_PLAYER_FLAG_SKIP);
 					Msg("--- [SV] OnPlayerReady: cleared stale SKIP for [%s].", xrCData->name.c_str());
@@ -620,7 +743,7 @@ void game_sv_Single::OnPlayerReady(ClientID id)
 
 		if (ps->testFlag(GAME_PLAYER_FLAG_SPECTATOR) || ps->testFlag(GAME_PLAYER_FLAG_VERY_VERY_DEAD))
 		{
-			Msg("--- [SV] Spawning mp_actor for [%s]...", xrCData->name.c_str());
+			Msg("--- [SV] Spawning player body for [%s]...", xrCData->name.c_str());
 			RespawnPlayer(id, true);
 			ps->resetFlag(GAME_PLAYER_FLAG_SPECTATOR + GAME_PLAYER_FLAG_VERY_VERY_DEAD + GAME_PLAYER_FLAG_SKIP);
 		}

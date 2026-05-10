@@ -44,6 +44,26 @@ namespace
 
 	SCrowActorsCache g_crow_actors_cache;
 	std::unordered_map<u16, u32> g_crow_last_log_time;
+	std::unordered_map<u16, u32> g_schedule_anchor_last_log_time;
+
+	IC bool object_is_actor_anchor(CObject* object)
+	{
+		if (!object || object->getDestroy() || !object->getEnabled())
+			return false;
+
+		if (!object->cast_actor())
+			return false;
+
+		if (g_dedicated_server)
+			return object->ID() != 0 && xr_strcmp(object->cNameSect().c_str(), "mp_actor") == 0;
+
+		return true;
+	}
+
+	IC bool schedule_anchor_diag_enabled()
+	{
+		return Core.Params && strstr(Core.Params, "-sp_sched_anchor_diag");
+	}
 
 	IC void crow_trace_to_crow(CObject* object, LPCSTR where, LPCSTR reason, float dist_sqr = -1.f)
 	{
@@ -104,15 +124,7 @@ namespace
 			for (u32 i = 0; i < object_count; ++i)
 			{
 				CObject* object = g_pGameLevel->Objects.o_get_by_iterator(i);
-				if (!object || object->getDestroy() || !object->getEnabled())
-					continue;
-
-				if (!object->cast_actor())
-					continue;
-
-				// Dedicated single uses an invisible system db.actor with id=0.
-				// It should not affect crow distance for world activity selection.
-				if (g_dedicated_server && object->ID() == 0)
+				if (!object_is_actor_anchor(object))
 					continue;
 
 				g_crow_actors_cache.actor_positions.push_back(object->Position());
@@ -131,6 +143,51 @@ namespace
 
 		return has_reference ? best_distance : FLT_MAX;
 	}
+}
+
+bool xr_server_nearest_actor_anchor(const Fvector& object_position, Fvector& actor_position,
+	float* actor_distance, u16* actor_id, LPCSTR* actor_name)
+{
+	if (actor_distance)
+		*actor_distance = flt_max;
+	if (actor_id)
+		*actor_id = u16(-1);
+	if (actor_name)
+		*actor_name = "";
+
+	if (!g_pGameLevel)
+		return false;
+
+	CObject* best_actor = nullptr;
+	float best_distance = flt_max;
+
+	const u32 object_count = g_pGameLevel->Objects.o_count();
+	for (u32 i = 0; i < object_count; ++i)
+	{
+		CObject* object = g_pGameLevel->Objects.o_get_by_iterator(i);
+		if (!object_is_actor_anchor(object))
+			continue;
+
+		const float distance = object_position.distance_to(object->Position());
+		if (distance >= best_distance)
+			continue;
+
+		best_distance = distance;
+		best_actor = object;
+	}
+
+	if (!best_actor)
+		return false;
+
+	actor_position.set(best_actor->Position());
+	if (actor_distance)
+		*actor_distance = best_distance;
+	if (actor_id)
+		*actor_id = best_actor->ID();
+	if (actor_name)
+		*actor_name = best_actor->cName().c_str();
+
+	return true;
 }
 
 void CObject::MakeMeCrow()
@@ -235,6 +292,41 @@ void CObject::setEnabled(BOOL _enabled)
 		Props.bEnabled = 0;
 		spatial.type &= ~STYPE_COLLIDEABLE;
 	}
+}
+
+float CObject::shedule_Scale()
+{
+	Fvector actor_position;
+	actor_position.set(0.f, 0.f, 0.f);
+	float actor_distance = -1.f;
+	u16 actor_id = u16(-1);
+	LPCSTR actor_name = "";
+	const bool use_server_actor_anchor =
+		g_dedicated_server &&
+		xr_server_nearest_actor_anchor(Position(), actor_position, &actor_distance, &actor_id, &actor_name);
+
+	const float camera_distance = Device.vCameraPosition.distance_to(Position());
+	const float scale = g_dedicated_server
+		? (use_server_actor_anchor ? actor_distance / 200.f : 1.f)
+		: camera_distance / 200.f;
+
+	if (g_dedicated_server && schedule_anchor_diag_enabled())
+	{
+		const u32 now = Device.dwTimeGlobal;
+		u32& last_log_time = g_schedule_anchor_last_log_time[ID()];
+		if (!last_log_time || (now - last_log_time) >= 2000)
+		{
+			last_log_time = now;
+			Msg("* [SP_SCHED_BASE] id=%hu name=[%s] sect=[%s] anchor=%s actor=%hu/%s actor_dist=%.3f cam_dist=%.3f scale=%.3f actor_pos=(%.2f %.2f %.2f) pos=(%.2f %.2f %.2f) cam=(%.2f %.2f %.2f)",
+				ID(), cName().c_str(), cNameSect().c_str(),
+				use_server_actor_anchor ? "mp_actor" : "NO_ANCHOR",
+				actor_id, actor_name, use_server_actor_anchor ? actor_distance : -1.f,
+				camera_distance, scale,
+				VPUSH(actor_position), VPUSH(Position()), VPUSH(Device.vCameraPosition));
+		}
+	}
+
+	return scale;
 }
 
 void CObject::setVisible(BOOL _visible)
@@ -477,18 +569,8 @@ void CObject::shedule_Update(u32 T)
 	ISheduled::shedule_Update(T);
 	spatial_update(base_spu_epsP * 1, base_spu_epsR * 1);
 
-	// Always make me crow on shedule-update
-	// Keepalive is distance-limited to avoid global CROW<->ACTIVE flapping.
-	if (AlwaysTheCrow())
-	{
-		make_me_crow_traced(this, "CObject::shedule_Update", "AlwaysTheCrow()");
-	}
-	else
-	{
-		const float dist = crow_distance_to_nearest_actor_sqr(Position());
-		if (dist < CROW_RADIUS2 * CROW_RADIUS2)
-			make_me_crow_traced(this, "CObject::shedule_Update", "nearest_actor_distance<CROW_RADIUS2", dist);
-	}
+	// Always make me crow on shedule-update, as in SP/monolith.
+	make_me_crow_traced(this, "CObject::shedule_Update", "sp_keepalive");
 }
 
 void CObject::spatial_register()

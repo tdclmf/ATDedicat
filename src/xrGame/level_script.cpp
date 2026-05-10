@@ -69,7 +69,7 @@ extern ENGINE_API bool g_dedicated_server;
 
 bool is_dedicated_server()
 {
-	return g_dedicated_server;
+	return IIsServer();
 }
 bool g_block_all_except_movement;
 bool g_actor_allow_ladder = true;
@@ -2923,6 +2923,8 @@ void CLevel::script_register(lua_State* L)
 	module(L)
 	[
 		def("is_dedicated_server", &is_dedicated_server),
+		def("IIsServer", &IIsServer),
+		def("IIsClient", &IIsClient),
 		def("command_line", &command_line),
 		def("IsGameTypeSingle", &IsGameTypeSingle),
 		def("IsDynamicMusic", &IsDynamicMusic),

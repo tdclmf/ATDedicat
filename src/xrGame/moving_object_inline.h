@@ -31,9 +31,14 @@ IC const CEntityAlive& moving_object::object() const
 	return (*m_object);
 }
 
+IC u32 moving_object::current_action_frame()
+{
+	return Device.dwFrame ? Device.dwFrame : Device.dwTimeGlobal;
+}
+
 IC void moving_object::action(const action_type& action)
 {
-	m_action_frame = Device.dwFrame;
+	m_action_frame = current_action_frame();
 	VERIFY((action == moving_object::action_move) || (action == moving_object::action_wait));
 	if (action == m_action)
 		return;
@@ -48,7 +53,7 @@ IC void moving_object::action(const action_type& action)
 
 IC void moving_object::action(const action_type& action, const Fvector& action_position)
 {
-	m_action_frame = Device.dwFrame;
+	m_action_frame = current_action_frame();
 	VERIFY((action == moving_object::action_move) || (action == moving_object::action_wait));
 	if (action == m_action)
 		return;

@@ -6,6 +6,10 @@
 #include "dRayMotions.h"
 #include "PHCollideValidator.h"
 #include "console_vars.h"
+#include "PHAICharacter.h"
+#include "IPhysicsShellHolder.h"
+#include "../xrCore/xrCore.h"
+#include "../xrEngine/device.h"
 #ifdef DEBUG
 #include "debug_output.h"
 #endif
@@ -18,6 +22,67 @@ CPHObject::CPHObject() : ISpatial(g_SpatialSpacePhysic)
 	m_island.Init();
 	m_check_count = 0;
 	CPHCollideValidator::InitObject(*this);
+}
+
+namespace
+{
+bool sp_trypos_diag_enabled()
+{
+	return Core.Params && strstr(Core.Params, "-sp_trypos_diag");
+}
+
+bool sp_ph_step_diag_allow()
+{
+	static u32 next_time = 0;
+	static u32 count = 0;
+	const u32 now = Device.dwTimeGlobal;
+	if (count < 256)
+	{
+		++count;
+		return true;
+	}
+
+	if (now < next_time)
+		return false;
+
+	next_time = now + 1000;
+	count = 0;
+	return true;
+}
+
+CPHAICharacter* sp_ai_character(CPHObject* object)
+{
+	if (!object || object->CastType() != CPHObject::tpCharacter)
+		return nullptr;
+
+	return static_cast<CPHCharacter*>(object)->CastAICharacter();
+}
+
+void sp_ph_step_log(CPHObject* object, LPCSTR phase, bool ret, bool grouped, u32 spatial_count, dReal step)
+{
+	CPHAICharacter* ai_character = sp_ai_character(object);
+	if (!ai_character || !sp_trypos_diag_enabled() || !sp_ph_step_diag_allow())
+		return;
+
+	IPhysicsShellHolder* ref_object = ai_character->PhysicsRefObject();
+	Fvector position;
+	position.set(0.f, 0.f, 0.f);
+	ai_character->GetPosition(position);
+
+	Msg("* [SP_PH_STEP] id=%hu name=[%s] sect=[%s] phase=%s ret=%d grouped=%d island_grouped=%d spatial=%u active=%d enabled=%d step=%.4f pos=(%.3f %.3f %.3f)",
+		ref_object ? ref_object->ObjectID() : u16(-1),
+		ref_object ? ref_object->ObjectName() : "",
+		ref_object ? ref_object->ObjectNameSect() : "",
+		phase ? phase : "",
+		ret ? 1 : 0,
+		grouped ? 1 : 0,
+		object->Island().IsObjGroun() ? 1 : 0,
+		spatial_count,
+		object->is_active() ? 1 : 0,
+		ai_character->IsEnabled() ? 1 : 0,
+		float(step),
+		VPUSH(position));
+}
 }
 
 void CPHObject::activate()
@@ -192,16 +257,22 @@ void CPHObject::step_prediction(float time)
 bool CPHObject::step_single(dReal step)
 {
 	CollideDynamics();
+	sp_ph_step_log(this, "pre_collide", !m_island.IsObjGroun(), m_island.IsObjGroun(),
+		static_cast<u32>(ph_world->r_spatial.size()), step);
 	bool ret = !m_island.IsObjGroun();
 	if (ret)
 	{
 		//PhTune							(step);
 		IslandStep(step);
+		sp_ph_step_log(this, "post_island_step", true, m_island.IsObjGroun(),
+			static_cast<u32>(ph_world->r_spatial.size()), step);
 		reinit_single();
 		//PhDataUpdate					(step);
 		spatial_move();
 		CollideDynamics();
 		ret = !m_island.IsObjGroun();
+		sp_ph_step_log(this, "post_collide", ret, m_island.IsObjGroun(),
+			static_cast<u32>(ph_world->r_spatial.size()), step);
 	}
 	reinit_single();
 	return ret;

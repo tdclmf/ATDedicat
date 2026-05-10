@@ -30,6 +30,7 @@
 #include "WeaponKnife.h"
 #include "CustomOutfit.h"
 #include "actor_mp_client.h"
+#include "player_actor_context.h"
 
 #include "actor_anim_defs.h"
 
@@ -69,8 +70,15 @@ IC CActor* Actor()
 		if (!actor)
 			actor = smart_cast<CActor*>(Level().CurrentControlEntity());
 		if (actor)
+		{
+			if (g_dedicated_server && !player_actor_context::IsRuntimePlayerActor(actor))
+				return nullptr;
 			return actor;
+		}
 	}
+
+	if (g_dedicated_server && !player_actor_context::IsRuntimePlayerActor(g_actor))
+		return nullptr;
 
 	return g_actor;
 }
@@ -769,9 +777,15 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 		return FALSE;
 	}
 
+	if (g_dedicated_server && Game().Type() == eGameIDSingle && E->ID == 0 && !strstr(Core.Params, "-withactor"))
+	{
+		Msg("--- [SV] Dedicated single bridge: skipping original system actor spawn ID: %u", E->ID);
+		return FALSE;
+	}
+
 	if (g_dedicated_server && Game().Type() == eGameIDSingle && E->ID == 0)
 	{
-		Msg("--- [SV] Dedicated single: spawning invisible system actor for db.actor context (ID=%u).", E->ID);
+		Msg("--- [SV][WITHACTOR] Dedicated single: spawning original actor for diagnostics (ID=%u).", E->ID);
 	}
 
 	// Animor:
@@ -851,8 +865,8 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 		// In dedicated-single bridge local playable actor can have non-zero id, so bind by flags.
 		// Dedicated server may spawn local actor mirrors without ASPLAYER flag: bind those too.
 		const bool should_bind_global_actor =
-			(E->s_flags.is(M_SPAWN_OBJECT_LOCAL) && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER)) ||
-			(g_dedicated_server && OnServer() && E->s_flags.is(M_SPAWN_OBJECT_LOCAL));
+			(!g_dedicated_server && E->s_flags.is(M_SPAWN_OBJECT_LOCAL) && E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER)) ||
+			(g_dedicated_server && OnServer() && player_actor_context::IsRuntimePlayerActor(this));
 		if (should_bind_global_actor)
 			g_actor = this;
 
@@ -1030,7 +1044,7 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 	const bool should_bind_db_actor =
 		(Game().Type() == eGameIDSingle) && (
 			(E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER) && E->s_flags.is(M_SPAWN_OBJECT_LOCAL)) ||
-			(g_dedicated_server && OnServer() && E->ID == 0)
+			(g_dedicated_server && OnServer() && E->ID == 0 && strstr(Core.Params, "-withactor"))
 		);
 
 	if (should_bind_db_actor)
@@ -1040,16 +1054,17 @@ BOOL CActor::net_Spawn(CSE_Abstract* DC)
 			SendDedicatedSingleLocalActorVisual(this, "net_spawn");
 	}
 
-	if (g_dedicated_server && OnServer() && Game().Type() == eGameIDSingle && E->ID == 0)
+	if (g_dedicated_server && OnServer() && Game().Type() == eGameIDSingle && E->ID == 0 && strstr(Core.Params, "-withactor"))
 	{
 		setVisible(FALSE);
-		Msg("--- [SV] Dedicated single: system db.actor is hidden and bound for scripts (id=%u).", ID());
+		Msg("--- [SV][WITHACTOR] Dedicated single: diagnostic actor is hidden and bound for scripts (id=%u).", ID());
 	}
 
 	//Alun: In theory it will call SwitchNightVision 'true' when outfit or helmet spawn and moved to slot if m_bNightVisionOn is true
 	m_bNightVisionOn = m_trader_flags.test(CSE_ALifeTraderAbstract::eTraderFlagNightVisionActive);
 
 	const bool is_mp_actor_class = (smart_cast<CActorMP*>(this) != nullptr);
+	player_actor_context::RegisterRuntimePlayer(this);
 	Msg("--- [NET] CActor::net_Spawn OK (obj_id=%u self_id=%u hp=%.3f alive=%d local=%d asplayer=%d client=%d server=%d mp_class=%d)",
 		E->ID, ID(), GetfHealth(), g_Alive(), E->s_flags.is(M_SPAWN_OBJECT_LOCAL),
 		E->s_flags.is(M_SPAWN_OBJECT_ASPLAYER), OnClient(), OnServer(), is_mp_actor_class ? 1 : 0);
@@ -1063,6 +1078,7 @@ namespace crash_saving {
 
 void CActor::net_Destroy()
 {
+	player_actor_context::UnregisterRuntimePlayer(this);
 	extern luabind::functor<void>* CGameObject_NetDestroy;
 
 	luabind::functor<void>* saved_net_destroy_callback = nullptr;

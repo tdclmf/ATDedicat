@@ -13,6 +13,8 @@
 #include "moving_objects_impl.h"
 #include "magic_box3.h"
 #include "ai_obstacle.h"
+#include "level.h"
+#include "gametype_chooser.h"
 
 #ifndef MASTER_GOLD
 #	include "ai_debug.h"
@@ -24,6 +26,42 @@
 #pragma warning(pop)
 
 extern MagicBox3 MagicMinBox(int iQuantity, const Fvector* akPoint);
+extern ENGINE_API bool g_dedicated_server;
+
+namespace
+{
+	IC bool sp_dyn_obs_dedicated_single()
+	{
+		return g_dedicated_server && (GameID() == eGameIDSingle);
+	}
+}
+
+#ifndef MASTER_GOLD
+namespace
+{
+	static u32 g_sp_dyn_obs_skip_diag_budget = 2000;
+
+	IC void sp_dyn_obs_log_skip(LPCSTR reason, const moving_object* object, u32 current_frame)
+	{
+		if (!g_sp_dyn_obs_skip_diag_budget)
+			return;
+
+		--g_sp_dyn_obs_skip_diag_budget;
+		Msg(
+			"* [SP_DYN_OBS_SKIP] reason=%s id=%u name=%s flags=%u static_flag=%d dedicated_single=%d current_frame=%u action_frame=%u action=%s",
+			reason,
+			object ? object->object().ID() : u16(-1),
+			object ? *object->object().cName() : "<null>",
+			psAI_Flags.get(),
+			psAI_Flags.test(aiObstaclesAvoidingStatic) ? 1 : 0,
+			sp_dyn_obs_dedicated_single() ? 1 : 0,
+			current_frame,
+			object ? object->action_frame() : u32(-1),
+			object ? (object->action() == moving_object::action_wait ? "wait" : "move") : "<null>"
+		);
+	}
+}
+#endif // MASTER_GOLD
 
 struct priority
 {
@@ -156,7 +194,7 @@ void moving_objects::fill_nearest_moving(moving_object* object)
 	{
 		static IC bool predicate(moving_object* const & object)
 		{
-			return (object->action_frame() == Device.dwFrame);
+			return (object->action_frame() == moving_object::current_action_frame());
 		}
 	};
 
@@ -565,12 +603,29 @@ void moving_objects::resolve_collisions()
 
 void moving_objects::query_action_dynamic(moving_object* object)
 {
-#ifndef MASTER_GOLD
-	if (psAI_Flags.test(aiObstaclesAvoidingStatic))
-		return;
+	const u32 current_frame = moving_object::current_action_frame();
 
-	if (object->action_frame() == Device.dwFrame)
+#ifdef MASTER_GOLD
+	if (!sp_dyn_obs_dedicated_single())
 		return;
+#endif // MASTER_GOLD
+
+#ifndef MASTER_GOLD
+	const bool static_only_avoidance = psAI_Flags.test(aiObstaclesAvoidingStatic);
+	if (static_only_avoidance && !sp_dyn_obs_dedicated_single())
+	{
+		sp_dyn_obs_log_skip("static_flag", object, current_frame);
+		return;
+	}
+#endif // MASTER_GOLD
+
+	if (object->action_frame() == current_frame)
+	{
+#ifndef MASTER_GOLD
+		sp_dyn_obs_log_skip("same_frame", object, current_frame);
+#endif // MASTER_GOLD
+		return;
+	}
 
 	m_visited_emitters.clear_not_free	();
 	m_collision_emitters.clear_not_free	();
@@ -627,6 +682,4 @@ void moving_objects::query_action_dynamic(moving_object* object)
 	NEAREST_MOVING::iterator	E = m_visited_emitters.end();
 	for ( ; I != E; ++I)
 		(*I)->action			(moving_object::action_move);
-
-#endif // MASTER_GOLD
 }
